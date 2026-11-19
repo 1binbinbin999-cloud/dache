@@ -1,0 +1,56 @@
+# Jarvis P1 配置（确定性核心，不含任何密钥）
+# P1 变化：config 改用 PyYAML 真解析，见 requirements.txt。
+version: "0.2.0-p1"
+project: jarvis
+environment: cloud-simulation
+
+core:
+  boot_order:
+    - config
+    - database
+    - policy
+    - audit
+    - scheduler
+  # P0 不加载任何模型
+  model_enabled: false
+
+database:
+  path: data/jarvis.db
+  # 种子任务只在库为空时写入一次，INSERT OR IGNORE 保证幂等
+  seed_on_first_boot: true
+
+audit:
+  event_log: data/events.jsonl
+  # 追加写，不可改；每条记录含时间、事件、结果
+  append_only: true
+
+memory:
+  schema_version: memory-facts-v1
+  # 写时 gate 阈值：置信度 <0.3 进隔离区；高置信度 + 单次证据只能是 provisional，需复核
+  min_confidence: 0.3
+  # 提取：P1 只用规则 + 模板，不调 LLM
+  extraction: rule_template
+  # 修正：旧事实标 superseded，不删除；Correction 记录保留历史
+  correction_keeps_history: true
+
+policy:
+  # P0 只允许读本地任务，不启用任何写工具，不允许任何外部调用
+  allowed_tools:
+    - list_tasks
+    - read_task
+  denied_tools:
+    - write_file
+    - delete_file
+    - send_email
+    - external_api_call
+  network_calls_allowed: false
+
+model:
+  # 占位，不填 Key。P2 路由切换时才在这里填逻辑模型名映射。
+  router_enabled: false
+  logical_models:
+    fast: null
+    capable: null
+    reasoning: null
+    local: null
+    embedding: null

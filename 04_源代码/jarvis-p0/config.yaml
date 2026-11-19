@@ -1,0 +1,48 @@
+# Jarvis P0 配置（确定性核心，不含任何密钥）
+# 原则：启动路径不得调用 LLM；配置、数据库、权限、审计先启动，模型后加载。
+# P0 根本不加载模型，model 部分只留占位，不填真实 Key。
+version: "0.1.0-p0"
+project: jarvis
+environment: cloud-simulation
+
+core:
+  boot_order:
+    - config
+    - database
+    - policy
+    - audit
+    - scheduler
+  # P0 不加载任何模型
+  model_enabled: false
+
+database:
+  path: data/jarvis.db
+  # 种子任务只在库为空时写入一次，INSERT OR IGNORE 保证幂等
+  seed_on_first_boot: true
+
+audit:
+  event_log: data/events.jsonl
+  # 追加写，不可改；每条记录含时间、事件、结果
+  append_only: true
+
+policy:
+  # P0 只允许读本地任务，不启用任何写工具，不允许任何外部调用
+  allowed_tools:
+    - list_tasks
+    - read_task
+  denied_tools:
+    - write_file
+    - delete_file
+    - send_email
+    - external_api_call
+  network_calls_allowed: false
+
+model:
+  # 占位，不填 Key。P2 路由切换时才在这里填逻辑模型名映射。
+  router_enabled: false
+  logical_models:
+    fast: null
+    capable: null
+    reasoning: null
+    local: null
+    embedding: null
