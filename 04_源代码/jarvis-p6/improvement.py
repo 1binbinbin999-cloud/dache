@@ -173,42 +173,45 @@ class ImprovementStore:
         return {"decision": "proposed", "id": proposal_id,
                 "base_sha256": base_sha256}
 
-    def test(self, proposal_id: str) -> dict:
-        """测试：在临时复制目录里应用改动，跑 boot + P1 记忆测试。"""
-        proposal = self._get(proposal_id)
-        if proposal is None:
-            return {"decision": "not_found", "id": proposal_id}
-        if proposal["status"] not in ("proposed", "evaluated", "tested"):
-            return {"decision": "rejected",
-                    "reason": f"cannot test in status {proposal['status']}"}
-        with tempfile.TemporaryDirectory() as tmp:
-            dest = Path(tmp) / "jarvis-test"
-            shutil.copytree(self.base_dir, dest,
-                            ignore=shutil.ignore_patterns("__pycache__", "data"))
-            (dest / "data").mkdir(exist_ok=True)
-            target = dest / proposal["target_file"]
-            text = target.read_text(encoding="utf-8")
-            target.write_text(text.replace(proposal["old_text"],
-                                           proposal["new_text"], 1),
-                              encoding="utf-8")
-            boot = subprocess.run(
-                [sys.executable, "jarvis.py", "boot"], cwd=dest,
-                capture_output=True, text=True, timeout=60,
-            )
-            tests = subprocess.run(
-                [sys.executable, "-m", "unittest",
-                 "tests.test_p1.TestP1.test_3_injection_intercept",
-                 "tests.test_p1.TestP1.test_1_hundred_synthetic_dialogues",
-                 "-v"],
-                cwd=dest, capture_output=True, text=True, timeout=120,
-            )
-            passed = boot.returncode == 0 and tests.returncode == 0
-            verdict = "pass" if passed else "fail"
-            test_result = {
-                "boot_exit": boot.returncode,
-                "tests_exit": tests.returncode,
-                "tests_tail": (tests.stdout + tests.stderr)[-500:],
-            }
+    def _tree_snapshot(self) -> dict:
+        """真实工程目录快照：除 data/ 与 __pycache__ 外全部文件的 sha256。
+
+        测试前后各拍一次；任何差异都说明未批准代码碰了真实目录。
+        """
+        snap: dict[str, str] = {}
+        base = self.base_dir.resolve()
+        for path in sorted(base.rglob("*")):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(base)
+            if rel.parts[0] in ("data", "__pycache__") or "__pycache__" in rel.parts:
+                continue
+            snap[str(rel)] = _sha256_file(path)
+        return snap
+
+    def _check_evaluator(self, dest: Path) -> tuple[bool, str]:
+        """评估器完整性：真实目录与临时复制目录的 tests/、config.yaml
+        必须与 evaluator_hashes.json 的记录一致。
+
+        评估器（测试代码、测试配置）是提案不可达的信任边界；清单本身
+        不在提案白名单里，提案改不了它。返回 (ok, reason)。
+        """
+        manifest_path = self.base_dir / EVALUATOR_MANIFEST
+        if not manifest_path.exists():
+            return False, "evaluator_manifest_missing"
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            return False, "evaluator_manifest_unreadable"
+        for rel, expected in manifest.items():
+            for root in (self.base_dir, dest):
+                path = root / rel
+                if not path.exists() or _sha256_file(path) != expected:
+                    return False, f"evaluator_tampered:{rel}"
+        return True, "ok"
+
+    def _record_evaluation(self, proposal_id: str, verdict: str,
+                           test_result: dict) -> None:
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 "INSERT INTO evaluations (id, proposal_id, test_result,"
@@ -220,11 +223,121 @@ class ImprovementStore:
         self._set_status(proposal_id, "evaluated")
         self._audit("improvement_tested", verdict,
                     {"id": proposal_id, "verdict": verdict})
+
+    def test(self, proposal_id: str) -> dict:
+        """测试：在临时复制目录里应用改动，在沙箱里跑 boot + P1 记忆测试。
+
+        哈希绑定全链：提案时 base_sha256 -> 测试时 patched_sha256 ->
+        批准时核对 base -> 部署时核对 patched。任一环节不一致即停。
+        """
+        proposal = self._get(proposal_id)
+        if proposal is None:
+            return {"decision": "not_found", "id": proposal_id}
+        if proposal["status"] not in ("proposed", "evaluated", "tested"):
+            return {"decision": "rejected",
+                    "reason": f"cannot test in status {proposal['status']}"}
+        from sandbox import run_sandboxed
+        with tempfile.TemporaryDirectory() as tmp:
+            dest = Path(tmp) / "jarvis-test"
+            shutil.copytree(self.base_dir, dest,
+                            ignore=shutil.ignore_patterns("__pycache__", "data"))
+            (dest / "data").mkdir(exist_ok=True)
+            ok, reason = self._check_evaluator(dest)
+            if not ok:
+                test_result = {"boot_exit": None, "tests_exit": None,
+                               "tests_tail": "", "reason": reason}
+                self._record_evaluation(proposal_id, "fail", test_result)
+                return {"decision": "evaluated", "id": proposal_id,
+                        "verdict": "fail", "test_result": test_result}
+            target = dest / proposal["target_file"]
+            # 纵深防御：目标解析后必须仍在 dest 内（propose 时已拦过一次）。
+            dest_base = dest.resolve()
+            try:
+                resolved = target.resolve()
+            except (OSError, RuntimeError):
+                resolved = None
+            if resolved is None or (resolved != dest_base
+                                    and dest_base not in resolved.parents):
+                test_result = {"boot_exit": None, "tests_exit": None,
+                               "tests_tail": "",
+                               "reason": "target_outside_test_dir"}
+                self._record_evaluation(proposal_id, "fail", test_result)
+                return {"decision": "evaluated", "id": proposal_id,
+                        "verdict": "fail", "test_result": test_result}
+            text = target.read_text(encoding="utf-8")
+            if text.count(proposal["old_text"]) != 1:
+                test_result = {"boot_exit": None, "tests_exit": None,
+                               "tests_tail": "",
+                               "reason": "target_changed_since_proposal"}
+                self._record_evaluation(proposal_id, "fail", test_result)
+                return {"decision": "evaluated", "id": proposal_id,
+                        "verdict": "fail", "test_result": test_result}
+            target.write_text(text.replace(proposal["old_text"],
+                                           proposal["new_text"], 1),
+                              encoding="utf-8")
+            patched_sha256 = _sha256_file(target)
+            snapshot_before = self._tree_snapshot()
+            boot = run_sandboxed(
+                self.base_dir, dest,
+                [sys.executable, "jarvis.py", "boot"], timeout=60,
+            )
+            tests = run_sandboxed(
+                self.base_dir, dest,
+                [sys.executable, "-m", "unittest",
+                 "tests.test_p1.TestP1.test_3_injection_intercept",
+                 "tests.test_p1.TestP1.test_1_hundred_synthetic_dialogues",
+                 "-v"],
+                timeout=120,
+            )
+            snapshot_after = self._tree_snapshot()
+            if boot.get("mode") == "unsupported" or tests.get("mode") == "unsupported":
+                reason = boot.get("reason") or tests.get("reason") or "sandbox_unavailable"
+                test_result = {"boot_exit": boot.get("returncode"),
+                               "tests_exit": tests.get("returncode"),
+                               "tests_tail": "", "reason": f"sandbox_unavailable:{reason}",
+                               "base_sha256": proposal.get("base_sha256"),
+                               "patched_sha256": patched_sha256}
+                self._record_evaluation(proposal_id, "fail", test_result)
+                return {"decision": "evaluated", "id": proposal_id,
+                        "verdict": "fail", "test_result": test_result}
+            if snapshot_after != snapshot_before:
+                changed = sorted(set(snapshot_after) ^ set(snapshot_before))
+                test_result = {"boot_exit": boot.get("returncode"),
+                               "tests_exit": tests.get("returncode"),
+                               "tests_tail": "",
+                               "reason": f"real_tree_modified:{changed}",
+                               "base_sha256": proposal.get("base_sha256"),
+                               "patched_sha256": patched_sha256}
+                self._record_evaluation(proposal_id, "fail", test_result)
+                return {"decision": "evaluated", "id": proposal_id,
+                        "verdict": "fail", "test_result": test_result}
+            passed = boot.get("ok") is True and tests.get("ok") is True
+            verdict = "pass" if passed else "fail"
+            test_result = {
+                "boot_exit": boot.get("returncode"),
+                "tests_exit": tests.get("returncode"),
+                "tests_tail": ((tests.get("stdout") or "")
+                               + (tests.get("stderr") or ""))[-500:],
+                "base_sha256": proposal.get("base_sha256"),
+                "patched_sha256": patched_sha256,
+            }
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE proposals SET patched_sha256=? WHERE id = ?",
+                (patched_sha256, proposal_id),
+            )
+            conn.commit()
+        self._record_evaluation(proposal_id, verdict, test_result)
         return {"decision": "evaluated", "id": proposal_id,
                 "verdict": verdict, "test_result": test_result}
 
     def approve(self, proposal_id: str) -> dict:
-        """批准：只有评价 pass 的提案才能批；批准是用户的显式动作。"""
+        """批准：只有评价 pass 的提案才能批；批准前核对目标文件未被改动。
+
+        哈希绑定：当前目标文件哈希必须等于提案时的 base_sha256，否则
+        提案依据的已不是当前代码，拒绝批准（须重新提案）。
+        批准是用户的显式动作。
+        """
         proposal = self._get(proposal_id)
         if proposal is None:
             return {"decision": "not_found", "id": proposal_id}
@@ -238,12 +351,24 @@ class ImprovementStore:
             ).fetchone()
         if row is None or row[0] != "pass":
             return {"decision": "rejected", "reason": "evaluation_not_pass"}
+        target = self._resolve_target(proposal["target_file"])
+        if target is None or not target.exists():
+            return {"decision": "rejected", "reason": "target_not_found"}
+        if proposal.get("base_sha256") and _sha256_file(target) != proposal["base_sha256"]:
+            return {"decision": "rejected", "reason": "target_changed_since_proposal"}
         self._set_status(proposal_id, "approved")
         self._audit("improvement_approved", "ok", {"id": proposal_id})
         return {"decision": "approved", "id": proposal_id}
 
     def deploy(self, proposal_id: str) -> dict:
-        """部署：只有 approved 的提案能部署；先备份，再应用，跑 boot 冒烟。"""
+        """部署：只有 approved 的提案能部署；先备份，再应用，跑 boot 冒烟。
+
+        哈希绑定：部署前核对目标文件哈希仍等于 base_sha256 且 old_text
+        恰好出现 1 次；部署后核对文件哈希等于测试时记录的 patched_sha256，
+        替换未生效即恢复备份、记审计、状态置 deploy_failed。
+        boot 失败同样恢复备份、记 improvement_deploy_failed 审计、
+        状态置 deploy_failed（I9）。
+        """
         proposal = self._get(proposal_id)
         if proposal is None:
             return {"decision": "not_found", "id": proposal_id}
@@ -253,21 +378,51 @@ class ImprovementStore:
                          "reason": f"deploy requires approved, status is {proposal['status']}"})
             return {"decision": "denied",
                     "reason": f"deploy requires approved, status is {proposal['status']}"}
-        target = self.base_dir / proposal["target_file"]
+        target = self._resolve_target(proposal["target_file"])
+        if target is None or not target.exists():
+            self._audit("improvement_deploy_failed", "failed",
+                        {"id": proposal_id, "reason": "target_not_found"})
+            self._set_status(proposal_id, "deploy_failed")
+            return {"decision": "failed", "id": proposal_id,
+                    "reason": "target_not_found"}
+        if proposal.get("base_sha256") and _sha256_file(target) != proposal["base_sha256"]:
+            self._audit("improvement_deploy_failed", "failed",
+                        {"id": proposal_id, "reason": "target_changed_since_proposal"})
+            self._set_status(proposal_id, "deploy_failed")
+            return {"decision": "failed", "id": proposal_id,
+                    "reason": "target_changed_since_proposal"}
         backup_dir = self.base_dir / "data" / "backups"
         backup_dir.mkdir(parents=True, exist_ok=True)
         backup_path = backup_dir / f"{proposal_id}-{target.name}"
         shutil.copy2(target, backup_path)
         text = target.read_text(encoding="utf-8")
+        if text.count(proposal["old_text"]) != 1:
+            self._audit("improvement_deploy_failed", "failed",
+                        {"id": proposal_id, "reason": "old_text_not_unique_at_deploy"})
+            self._set_status(proposal_id, "deploy_failed")
+            return {"decision": "failed", "id": proposal_id,
+                    "reason": "old_text_not_unique_at_deploy"}
         target.write_text(text.replace(proposal["old_text"],
                                        proposal["new_text"], 1),
                           encoding="utf-8")
+        if proposal.get("patched_sha256") and _sha256_file(target) != proposal["patched_sha256"]:
+            shutil.copy2(backup_path, target)
+            self._audit("improvement_deploy_failed", "failed",
+                        {"id": proposal_id,
+                         "reason": "deployed_hash_mismatch"})
+            self._set_status(proposal_id, "deploy_failed")
+            return {"decision": "failed", "id": proposal_id,
+                    "reason": "deployed_hash_mismatch"}
         boot = subprocess.run(
             [sys.executable, "jarvis.py", "boot"], cwd=self.base_dir,
             capture_output=True, text=True, timeout=60,
         )
         if boot.returncode != 0:
             shutil.copy2(backup_path, target)
+            self._audit("improvement_deploy_failed", "failed",
+                        {"id": proposal_id, "reason": "boot failed after deploy, restored backup",
+                         "boot_exit": boot.returncode})
+            self._set_status(proposal_id, "deploy_failed")
             return {"decision": "failed", "id": proposal_id,
                     "reason": "boot failed after deploy, restored backup"}
         with sqlite3.connect(self.db_path) as conn:
@@ -285,14 +440,20 @@ class ImprovementStore:
                 "backup": str(backup_path)}
 
     def rollback(self, proposal_id: str) -> dict:
-        """回滚：用部署时备份恢复原文件，状态 rolled_back。"""
+        """回滚：用部署时备份恢复原文件，状态 rolled_back。
+
+        版本保护（I8）：同一目标文件存在更晚的、未回滚的部署时拒绝
+        回滚——整文件还原会抹掉更晚部署的改动。须先回滚更晚的部署，
+        再回滚本提案。回滚后不存在被波及的部署：更晚的要么不存在，
+        要么已回滚；更早的部署改动包含在本备份里，不受影响。
+        """
         proposal = self._get(proposal_id)
         if proposal is None:
             return {"decision": "not_found", "id": proposal_id}
         with sqlite3.connect(self.db_path) as conn:
             conn.row_factory = sqlite3.Row
             dep = conn.execute(
-                "SELECT * FROM deployments WHERE proposal_id = ?"
+                "SELECT rowid, * FROM deployments WHERE proposal_id = ?"
                 " ORDER BY deployed_at DESC LIMIT 1", (proposal_id,)
             ).fetchone()
         if dep is None:
@@ -300,7 +461,24 @@ class ImprovementStore:
         dep = dict(dep)
         if dep["rolled_back"]:
             return {"decision": "rejected", "reason": "already rolled back"}
-        target = self.base_dir / proposal["target_file"]
+        with sqlite3.connect(self.db_path) as conn:
+            later = conn.execute(
+                "SELECT d.proposal_id FROM deployments d"
+                " JOIN proposals p ON p.id = d.proposal_id"
+                " WHERE p.target_file = ? AND d.rolled_back = 0"
+                " AND d.rowid > ?",
+                (proposal["target_file"], dep["rowid"]),
+            ).fetchall()
+        if later:
+            self._audit("improvement_rollback_denied", "denied",
+                        {"id": proposal_id,
+                         "reason": "later_deployment_exists",
+                         "later": [row[0] for row in later]})
+            return {"decision": "rejected", "reason": "later_deployment_exists",
+                    "later": [row[0] for row in later]}
+        target = self._resolve_target(proposal["target_file"])
+        if target is None or not target.exists():
+            return {"decision": "rejected", "reason": "target_not_found"}
         shutil.copy2(dep["backup_path"], target)
         with sqlite3.connect(self.db_path) as conn:
             conn.execute("UPDATE deployments SET rolled_back=1 WHERE id = ?",
