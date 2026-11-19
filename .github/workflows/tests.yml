@@ -17,6 +17,10 @@ jobs:
           python-version: "3.12"
       - name: Install dependencies
         run: pip install pyyaml==6.0.1
+      - name: Enable unprivileged user namespaces (for sandbox tests)
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
       - name: Run P0-P5 cumulative tests (38)
         working-directory: 04_源代码/jarvis-p5
         run: python3 -m unittest discover -s tests -v
