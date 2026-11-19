@@ -109,6 +109,12 @@ class Gateway:
         if tool == "memory-recall":
             return {"facts": self.memory.list_current(args.get("query"))}
         if tool == "memory-add":
+            # P6-11：证据等级不得由调用方自报。非用户 actor（规划器等）
+            # 一律强制 evidence_grade=single_occurrence；经 add_fact 的
+            # 状态规则，状态上限自动为 provisional，不得自授 verified。
+            if actor != "user":
+                args = dict(args)
+                args["evidence_grade"] = "single_occurrence"
             return self.memory.add_fact(
                 args.get("text", ""), args.get("type", "fact"),
                 float(args.get("confidence", 0.6)),

@@ -33,8 +33,11 @@ TEMPLATES = {
     "learn-and-record": [
         {"tool": "memory-recall", "args": {}},
         {"tool": "router-call", "args": {"logical": "reasoning", "prompt": "解释一个概念"}},
+        # P6-11：模板是规划器 actor，不是用户本人，不得自报 user_stated 0.9
+        #（旧模板写死 0.9/user_stated，跑完即 verified，M-e）。模板只报
+        # 单次证据 0.6，网关对非用户 actor 还会再强制降级，状态上限 provisional。
         {"tool": "memory-add", "args": {"text": "用户目标是学会跑步", "type": "fact",
-                                        "confidence": 0.9, "evidence_grade": "user_stated",
+                                        "confidence": 0.6, "evidence_grade": "single_occurrence",
                                         "source": "planner:learn-and-record",
                                         "id": "mem-plan-learn-001"}},
     ],

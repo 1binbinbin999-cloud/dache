@@ -5,6 +5,18 @@
 - 写时 gate：新事实写入前做一致性检查，低于阈值进隔离区，不直接入库。
 - 版本化、不删除旧版：修正不是覆盖旧事实，而是旧事实标 superseded，新事实另起一条，Correction 记录保留历史。
 - P1 先用规则 + 模板提取，不调 LLM，证明流程本身成立；LLM 提取留给 P2 路由就绪后。
+- 可信等级语义（P6-11，见三方质疑裁决记录）：
+  verified = 已通过写时 gate 且置信度 >=0.8 且证据等级属于
+  (user_stated, verified, multiple_occurrences) 的当前事实；只有用户
+  本人（actor=user）或 gate 的 accepted 判定能产生 verified。
+  provisional = 待核实的当前事实（单次证据、高置信单次、外部导入等）。
+  外部导入、规划器模板等非用户 actor 一律不得自授 verified：导入的
+  verified 一律降为 provisional；网关对 actor != "user" 的 memory-add
+  强制 evidence_grade=single_occurrence（从而状态上限 provisional）。
+  superseded / expired / disputed 不是当前事实，不召回。
+- 修正只改当前事实：correct_fact 只允许修正 verified/provisional，
+  新事实继承旧事实的置信度与证据等级（不自授 0.9/verified），
+  注入文本进隔离区、旧事实不动；回滚只允许链最新项，按原状态恢复。
 
 只用标准库 + SQLite。PyYAML 只在 core.py 读配置时用，memory.py 本身不依赖它。
 """
@@ -176,10 +188,22 @@ class MemoryStore:
                     new_text TEXT NOT NULL,
                     evidence TEXT NOT NULL,
                     actor TEXT NOT NULL,
-                    created_at TEXT NOT NULL
+                    created_at TEXT NOT NULL,
+                    new_fact_id TEXT,
+                    old_status TEXT
                 )
                 """
             )
+            # P6-10：旧库补链追踪列。new_fact_id = 本次修正产生的新事实 id，
+            # old_status = 被修正事实在修正前的状态（回滚时按原状态恢复）。
+            corr_cols = {row[1] for row in
+                         conn.execute("PRAGMA table_info(corrections)")}
+            if "new_fact_id" not in corr_cols:
+                conn.execute(
+                    "ALTER TABLE corrections ADD COLUMN new_fact_id TEXT")
+            if "old_status" not in corr_cols:
+                conn.execute(
+                    "ALTER TABLE corrections ADD COLUMN old_status TEXT")
             conn.commit()
 
     def _insert_fact(self, conn, fact_id, fact_type, text, confidence,
@@ -283,11 +307,56 @@ class MemoryStore:
 
     def correct_fact(self, fact_id: str, new_text: str, evidence: str,
                      actor: str = "user") -> dict:
-        """修正：旧事实标 superseded（保留历史），新事实另起一条，写 Correction 记录。"""
+        """修正：旧事实标 superseded（保留历史），新事实另起一条，写 Correction 记录。
+
+        P6-5（M-a 的修复）：修正前先过 WriteGate，不通过进隔离区、
+        旧事实不动；只允许修正 verified/provisional 的当前事实
+        （已取代的事实不得再修正，否则会产生两条“当前”事实，M-c）；
+        新事实继承旧事实的置信度与证据等级与状态上限，
+        不再硬编码 0.9/verified（旧代码的自授高可信是 M-a 的根因）。
+        旧事实的置信度/证据等级若已损坏（非数值、越界、非法等级，
+        多为旧版未校验导入的遗留行），则以 (0.6, single_occurrence)
+        兜底并降为 provisional，不抛异常。
+        """
         self.init()
         old = self.get_fact(fact_id)
         if old is None:
             return {"decision": "not_found", "id": fact_id}
+        if old["status"] not in ("verified", "provisional"):
+            return {"decision": "rejected", "id": fact_id,
+                    "reason": f"cannot_correct_status:{old['status']}"}
+        try:
+            old_conf = float(old["confidence"])
+        except (TypeError, ValueError):
+            old_conf = None
+        trust_reset = False
+        if (old_conf is None or isinstance(old["confidence"], bool)
+                or not (0.0 <= old_conf <= 1.0)
+                or old["evidence_grade"] not in EVIDENCE_GRADES):
+            old_conf, old_grade, trust_reset = 0.6, "single_occurrence", True
+        else:
+            old_grade = old["evidence_grade"]
+        decision, reason = WriteGate.check(
+            new_text, old["type"], old_conf, old_grade,
+            f"correction:{evidence}")
+        if decision == "quarantined":
+            qid = f"q-{uuid.uuid4().hex[:12]}"
+            with sqlite3.connect(self.db_path) as conn:
+                conn.execute(
+                    "INSERT INTO quarantine (id, text, reason, source, created_at)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (qid, new_text, reason, f"correction:{evidence}", now_iso()),
+                )
+                conn.commit()
+            return {"decision": "quarantined", "id": fact_id,
+                    "reason": reason, "quarantine_id": qid}
+        if (not trust_reset and decision == "accepted"
+                and old["status"] == "verified" and old_conf >= 0.8
+                and old_grade in ("user_stated", "verified",
+                                  "multiple_occurrences")):
+            new_status = "verified"
+        else:
+            new_status = "provisional"
         new_id = f"mem-{uuid.uuid4().hex[:12]}"
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
@@ -295,17 +364,20 @@ class MemoryStore:
                 " WHERE id = ?",
                 (new_id, fact_id),
             )
-            self._insert_fact(conn, new_id, old["type"], new_text, 0.9,
-                              "verified", f"correction:{evidence}",
-                              today_str(), None, "verified")
+            self._insert_fact(conn, new_id, old["type"], new_text, old_conf,
+                              old_grade, f"correction:{evidence}",
+                              today_str(), None, new_status)
             conn.execute(
                 "INSERT INTO corrections (id, fact_id, old_text, new_text,"
-                " evidence, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                " evidence, actor, created_at, new_fact_id, old_status)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (f"corr-{uuid.uuid4().hex[:8]}", fact_id, old["text"],
-                 new_text, evidence, actor, now_iso()),
+                 new_text, evidence, actor, now_iso(), new_id,
+                 old["status"]),
             )
             conn.commit()
-        return {"decision": "corrected", "old_id": fact_id, "new_id": new_id}
+        return {"decision": "corrected", "old_id": fact_id, "new_id": new_id,
+                "status": new_status, "trust_reset": trust_reset}
 
     def list_corrections(self) -> list[dict]:
         self.init()
@@ -319,8 +391,14 @@ class MemoryStore:
     def rollback_correction(self, correction_id: str, actor: str = "user") -> dict:
         """一键改回：按 Correction 记录回滚一次修正。
 
-        旧事实恢复为 verified（superseded_by 清空），新事实标 superseded，
-        再写一条反向 Correction 记录，历史全保留。
+        P6-10（M-c/M-d 的修复）：只允许回滚链最新项——被修正事实的
+        superseded_by 必须仍指向本次修正产生的新事实，否则说明之后
+        还有更新的修正，回滚会与之冲突，直接拒绝（M-d 的根因：旧代码
+        按 superseded_by 找新事实，链式修正后它已指向更晚的事实）；
+        新事实必须是当前事实（verified/provisional），已取代的不回滚；
+        旧事实按修正前记录的原状态恢复，不再无条件恢复成 verified；
+        缺链追踪字段的老记录（new_fact_id 为空）无法核验链位置，拒绝。
+        历史全保留：再写一条反向 Correction 记录。
         """
         self.init()
         with sqlite3.connect(self.db_path) as conn:
@@ -331,40 +409,53 @@ class MemoryStore:
             if corr is None:
                 return {"decision": "not_found", "id": correction_id}
             corr = dict(corr)
+            new_fact_id = corr.get("new_fact_id")
+            old_status = corr.get("old_status")
+            if not new_fact_id or not old_status:
+                return {"decision": "rejected", "id": correction_id,
+                        "reason": "correction_chain_unknown"}
             old = conn.execute(
                 "SELECT * FROM memory_facts WHERE id = ?", (corr["fact_id"],)
             ).fetchone()
             if old is None:
                 return {"decision": "not_found", "id": corr["fact_id"]}
             old = dict(old)
-            new_id = old.get("superseded_by")
-            if not new_id:
-                return {"decision": "nothing_to_rollback", "id": corr["fact_id"]}
             new = conn.execute(
-                "SELECT * FROM memory_facts WHERE id = ?", (new_id,)
+                "SELECT * FROM memory_facts WHERE id = ?", (new_fact_id,)
             ).fetchone()
             if new is None:
-                return {"decision": "not_found", "id": new_id}
-            # 旧恢复 verified，新标 superseded
+                return {"decision": "not_found", "id": new_fact_id}
+            new = dict(new)
+            # 链最新检查：旧事实的 superseded_by 必须仍指向本次修正的新事实
+            if old.get("superseded_by") != new_fact_id:
+                return {"decision": "rejected", "id": correction_id,
+                        "reason": "not_latest_correction"}
+            if new["status"] not in ("verified", "provisional"):
+                return {"decision": "rejected", "id": correction_id,
+                        "reason": f"cannot_rollback_status:{new['status']}"}
+            # 旧事实按原状态恢复，新事实标 superseded
             conn.execute(
-                "UPDATE memory_facts SET status='verified', superseded_by=NULL"
+                "UPDATE memory_facts SET status=?, superseded_by=NULL"
                 " WHERE id = ?",
-                (corr["fact_id"],),
+                (old_status, corr["fact_id"]),
             )
             conn.execute(
                 "UPDATE memory_facts SET status='superseded', superseded_by=?"
                 " WHERE id = ?",
-                (corr["fact_id"], new_id),
+                (corr["fact_id"], new_fact_id),
             )
             conn.execute(
                 "INSERT INTO corrections (id, fact_id, old_text, new_text,"
-                " evidence, actor, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-                (f"corr-{uuid.uuid4().hex[:8]}", new_id, corr["new_text"],
-                 corr["old_text"], f"rollback of {correction_id}", actor, now_iso()),
+                " evidence, actor, created_at, new_fact_id, old_status)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (f"corr-{uuid.uuid4().hex[:8]}", new_fact_id, corr["new_text"],
+                 corr["old_text"], f"rollback of {correction_id}", actor,
+                 now_iso(), corr["fact_id"], new["status"]),
             )
             conn.commit()
         return {"decision": "rolled_back", "correction_id": correction_id,
-                "restored_id": corr["fact_id"], "superseded_id": new_id}
+                "restored_id": corr["fact_id"], "superseded_id": new_fact_id,
+                "restored_status": old_status}
 
     def count_by_status(self) -> dict:
         self.init()
@@ -391,32 +482,95 @@ class MemoryStore:
         return {"schema_version": SCHEMA_VERSION, "count": len(rows), "path": str(out_path)}
 
     def import_jsonl(self, in_path: Path) -> dict:
-        """导入导出的 JSONL：校验 schema_version，按 id 幂等写入，返回计数。"""
+        """导入导出的 JSONL：逐条校验，逐条隔离，返回四分计数。
+
+        P6-6（M-b 的修复）：每行逐条校验 status/type/confidence/
+        evidence_grade/必填字段，再过 WriteGate；不合格计 rejected，
+        缺字段逐条计 rejected、不整批回滚；重复 id 计 ignored_existing
+        （旧代码 INSERT OR IGNORE 静默丢行不计数，2+1≠4）；schema_version
+        不符计 skipped；四数之和恒等于行数。外部数据不得自授 verified：
+        文件里标 verified 的行一律降为 provisional 入库（P6-11）。
+        每行独立提交，一行的坏数据不影响其他行。
+        """
         self.init()
         imported = 0
+        ignored_existing = 0
+        rejected = 0
         skipped = 0
         with open(in_path, encoding="utf-8") as f:
             lines = [line.strip() for line in f if line.strip()]
-        with sqlite3.connect(self.db_path) as conn:
-            for line in lines:
+        required = ("id", "type", "text", "confidence", "evidence_grade",
+                    "source", "created_at", "status")
+        for line in lines:
+            try:
                 record = json.loads(line)
-                if record.get("schema_version") != SCHEMA_VERSION:
-                    skipped += 1
-                    continue
-                before = conn.total_changes
-                conn.execute(
-                    "INSERT OR IGNORE INTO memory_facts"
-                    " (id, type, text, confidence, evidence_grade, source,"
-                    "  created_at, valid_from, valid_until, status, superseded_by)"
-                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (record["id"], record["type"], record["text"],
-                     record["confidence"], record["evidence_grade"],
-                     record["source"], record["created_at"],
-                     record.get("valid_from"), record.get("valid_until"),
-                     record["status"], record.get("superseded_by")),
-                )
-                if conn.total_changes > before:
-                    imported += 1
-            conn.commit()
+            except Exception:
+                rejected += 1
+                continue
+            if not isinstance(record, dict):
+                rejected += 1
+                continue
+            if record.get("schema_version") != SCHEMA_VERSION:
+                skipped += 1
+                continue
+            if any(k not in record for k in required):
+                rejected += 1
+                continue
+            if (record["type"] not in FACT_TYPES
+                    or record["status"] not in STATUSES
+                    or record["evidence_grade"] not in EVIDENCE_GRADES
+                    or not isinstance(record["text"], str)
+                    or not record["text"].strip()
+                    or not isinstance(record["id"], str)
+                    or not record["id"].strip()
+                    or not isinstance(record["source"], str)
+                    or not record["source"].strip()
+                    or not isinstance(record["created_at"], str)):
+                rejected += 1
+                continue
+            try:
+                conf = float(record["confidence"])
+            except (TypeError, ValueError):
+                rejected += 1
+                continue
+            if (isinstance(record["confidence"], bool)
+                    or not (0.0 <= conf <= 1.0)):
+                rejected += 1
+                continue
+            if record.get("superseded_by") is not None and not isinstance(
+                    record.get("superseded_by"), str):
+                rejected += 1
+                continue
+            if self.get_fact(record["id"]) is not None:
+                ignored_existing += 1
+                continue
+            decision, _reason = WriteGate.check(
+                record["text"], record["type"], conf,
+                record["evidence_grade"], record["source"])
+            if decision == "quarantined":
+                rejected += 1
+                continue
+            # 外部数据不得自授 verified：降为 provisional（P6-11）
+            status = ("provisional" if record["status"] == "verified"
+                      else record["status"])
+            try:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute(
+                        "INSERT INTO memory_facts"
+                        " (id, type, text, confidence, evidence_grade, source,"
+                        "  created_at, valid_from, valid_until, status, superseded_by)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (record["id"], record["type"], record["text"],
+                         conf, record["evidence_grade"],
+                         record["source"], record["created_at"],
+                         record.get("valid_from"), record.get("valid_until"),
+                         status, record.get("superseded_by")),
+                    )
+                    conn.commit()
+            except Exception:
+                rejected += 1
+                continue
+            imported += 1
         return {"schema_version": SCHEMA_VERSION, "imported": imported,
+                "ignored_existing": ignored_existing, "rejected": rejected,
                 "skipped": skipped, "lines": len(lines)}
