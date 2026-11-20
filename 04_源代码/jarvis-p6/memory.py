@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import unicodedata
 import uuid
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -82,18 +83,33 @@ class WriteGate:
     @staticmethod
     def check(text: str, fact_type: str, confidence: float,
               evidence_grade: str, source: str) -> tuple[str, str]:
-        """返回 (decision, reason)，decision ∈ accepted / needs_review / quarantined。"""
-        if not text or len(text.strip()) < 4:
+        """返回 (decision, reason)，decision ∈ accepted / needs_review / quarantined。
+
+        P6-17（第一步，机械部分）：匹配前做 NFKC 归一化 + 空白折叠，
+        堵住全角字符与双空格绕过（M-f 的两类已证实绕过）；只改匹配用文本，
+        不改存入文本。词边界规则与注入模式清单的改动会同时移动误杀与
+        漏杀的边界，须先冻结期望行为并补回归测试（tests/test_p6.py 的
+        test_16_gate_freeze）再做，留待第二阶段（见裁决记录 Claude 15）。
+        """
+        if not isinstance(text, str):
+            return "quarantined", "non_text_input"
+        # 归一化：全角 -> 半角、空白折叠；长度与匹配都用归一化后文本
+        normalized = " ".join(unicodedata.normalize("NFKC", text).split())
+        if not normalized or len(normalized) < 4:
             return "quarantined", "empty_or_too_short"
         if fact_type not in FACT_TYPES:
             return "quarantined", "invalid_type"
+        # P6-17 附带：confidence 非数值（字符串/None）时数值比较会抛
+        # TypeError（M-g 注记），直接隔离，不抛异常。
+        if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
+            return "quarantined", "confidence_not_numeric"
         if not (0.0 <= confidence <= 1.0):
             return "quarantined", "confidence_out_of_range"
         if evidence_grade not in EVIDENCE_GRADES:
             return "quarantined", "invalid_evidence_grade"
         if not source or not source.strip():
             return "quarantined", "missing_source"
-        lowered = text.lower()
+        lowered = normalized.lower()
         for pat in INJECTION_PATTERNS:
             if pat.lower() in lowered:
                 return "quarantined", f"injection_pattern:{pat}"
@@ -101,7 +117,7 @@ class WriteGate:
         if (
             evidence_grade == "single_occurrence"
             and confidence < 0.8
-            and any(m in text for m in OVERGENERALIZATION_MARKERS)
+            and any(m in normalized for m in OVERGENERALIZATION_MARKERS)
         ):
             return "quarantined", "overgeneralization"
         if confidence < 0.3:

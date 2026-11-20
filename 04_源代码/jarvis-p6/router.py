@@ -6,7 +6,10 @@
 - P2 先用 Stub（本地假模型，返回固定格式），不接任何真实 API，不产生费用。
   LiteLLM 配置占位在 config.yaml 里，P2 后期接真实供应商时才启用。
 - 故障切换链：首选 -> 备选 -> 本地，每家最多试一次，不死循环重试。
+  例外：logical=local 时只走本地；logical=embedding 时只走 embedding 类
+  供应商，不回落到文本模型（否则会静默返回非向量结果，P6-15）。
 - 全失败时走 L0 规则降级：返回确定性模板回答，不报错瘫痪，标记 degraded=true。
+  例外：embedding 全失败时不返回文本，只返回空内容 + error 标记（P6-15）。
 - 每次调用都记审计：模型、token、成本、耗时、结果 hash，写进事件日志。
 
 不联网，不 import 任何模型供应商 SDK。
@@ -82,11 +85,14 @@ class Router:
     def chain_for(self, logical: str) -> list[str]:
         """切换链：首选 -> 备选 -> 本地，去重，顺序固定。
         例外：logical=local 时只走本地，不回落到云端——否则“本地”承诺会被悄悄打破。
+        例外：logical=embedding 时只走 embedding 类供应商，不回落到文本模型——
+        否则 embedding 失败后会静默返回文本结果（P6-15；如需多个 embedding
+        供应商，须在配置里为 embedding 指定多个同类供应商，Phase 2）。
         """
         if logical not in self.mapping:
             raise ValueError(f"unknown logical model: {logical}")
         primary = self.mapping[logical]
-        if logical == "local":
+        if logical in ("local", "embedding"):
             return [primary]
         backup = self.mapping.get("capable", "stub-capable")
         local = self.mapping.get("local", "stub-local")
@@ -110,7 +116,7 @@ class Router:
             except ProviderError as exc:
                 latency_ms = int((time.monotonic() - start) * 1000)
                 self.event_log.append(
-                    "router_fallback", "ok",
+                    "router_fallback", "fallback",
                     json.dumps({"logical": logical, "provider": provider_name,
                                 "error": str(exc), "latency_ms": latency_ms},
                                ensure_ascii=False),
@@ -132,6 +138,33 @@ class Router:
             self.event_log.append("router_call", "ok", json.dumps(record, ensure_ascii=False))
             return {**result, **record}
         # 全失败：降级，不抛异常
+        if logical == "embedding":
+            # P6-15：embedding 全失败不得返回文本降级回答（那不是向量）。
+            # 返回空内容 + error 标记，调用方按 error 处理。
+            result = {
+                "model": "embedding-unavailable",
+                "content": "",
+                "tokens_in": len(prompt.split()),
+                "tokens_out": 0,
+                "cost_usd": 0.0,
+                "degraded": True,
+                "error": "embedding_unavailable",
+            }
+            result_hash = hashlib.sha256(result["content"].encode("utf-8")).hexdigest()
+            record = {
+                "logical": logical,
+                "model": result["model"],
+                "tokens_in": result["tokens_in"],
+                "tokens_out": result["tokens_out"],
+                "cost_usd": 0.0,
+                "latency_ms": 0,
+                "result_hash": result_hash,
+                "degraded": True,
+                "attempted": attempted,
+                "error": "embedding_unavailable",
+            }
+            self.event_log.append("router_call", "ok", json.dumps(record, ensure_ascii=False))
+            return {**result, **record}
         result = degraded_response(prompt)
         result_hash = hashlib.sha256(result["content"].encode("utf-8")).hexdigest()
         record = {

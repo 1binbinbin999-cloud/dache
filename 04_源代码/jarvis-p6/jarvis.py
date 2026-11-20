@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
-"""Jarvis P2 CLI：boot / health / list-tasks / memory-* / router-*
+"""Jarvis P6 CLI：boot / health / list-tasks / memory-* / router-*
 
-用法（在 jarvis-p2/ 目录下）：
+用法（在 jarvis-p6/ 目录下）：
   python3 jarvis.py boot
   python3 jarvis.py router-call --logical fast --prompt "你好"
   python3 jarvis.py router-call --logical fast --prompt "你好" --fail stub-fast
@@ -9,7 +9,7 @@
   python3 jarvis.py memory-rollback --correction-id corr-xxx
   python3 jarvis.py memory-import --in data/memory-export.jsonl
 
-P2 只用 Stub，不接真实 API，不调用任何模型供应商，不联网。
+P6 仍只用 Stub，不接真实 API，不调用任何模型供应商，不联网。
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ from sandbox import sandbox_check  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="jarvis", description="Jarvis P2 — 路由切换原型")
+    parser = argparse.ArgumentParser(prog="jarvis", description="Jarvis P6 — 安全修复轮")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("boot", help="按固定顺序启动核心")
     sub.add_parser("health", help="健康检查")

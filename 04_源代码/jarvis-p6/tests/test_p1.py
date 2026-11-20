@@ -68,7 +68,8 @@ def fresh_db():
     data/backups/* 全部删除（P6：fresh_db 漏删 improvements.db 是 34/38 的根因），
     再 boot 重建。"""
     data_dir = P1_DIR / "data"
-    for name in ("jarvis.db", "improvements.db", "events.jsonl"):
+    for name in ("jarvis.db", "improvements.db", "events.jsonl",
+                 "events.checkpoint.json"):
         p = data_dir / name
         if p.exists():
             p.unlink()

@@ -1,4 +1,4 @@
-"""Jarvis P1 — 确定性核心（Agent Core 最小版）
+"""Jarvis P6 — 确定性核心（Agent Core 最小版）
 
 设计红线（来自总体架构）：
 - 这是纯确定性代码，不导入任何模型供应商 SDK，不调用任何 LLM，不联网。
@@ -11,7 +11,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import sqlite3
 import sys
 from datetime import datetime, timezone
@@ -55,11 +57,77 @@ def now_iso() -> str:
 
 
 class EventLog:
-    """追加写事件日志。"""
+    """追加写事件日志（P6-18：哈希链）。
+
+    每条记录带 prev_hash（上一条的 entry_hash）与 entry_hash
+    （本条内容的 sha256），并在同目录写检查点文件
+    events.checkpoint.json（条数 + 末尾哈希）。verify() 逐条核对链
+    与检查点：截断表现为条数少于检查点，篡改表现为哈希不匹配。
+    局限（已记录在案）：检查点在追加时被覆盖，截断须在追加前用
+    verify() 发现；检查点本身被删则无法确认完整性。完整方案须把
+    检查点放独立信任域，Phase 2。旧日志（无 entry_hash 的记录）
+    逐条标 legacy_entry，不可验证。
+    """
+
+    GENESIS = "GENESIS"
 
     def __init__(self, path: Path):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _checkpoint_path(self) -> Path:
+        return self.path.parent / (self.path.stem + ".checkpoint.json")
+
+    def _read_checkpoint(self) -> tuple[int, str]:
+        """读检查点；缺失或损坏返回 (0, GENESIS)。"""
+        try:
+            data = json.loads(
+                self._checkpoint_path().read_text(encoding="utf-8"))
+            return int(data["count"]), str(data["last_hash"])
+        except Exception:
+            return 0, self.GENESIS
+
+    def _last_hash(self) -> str:
+        """上一条的 entry_hash：优先检查点；无检查点时从日志末尾取；
+        旧记录无 entry_hash 时用行哈希锚定（LEGACY: 前缀）。"""
+        count, last_hash = self._read_checkpoint()
+        if count > 0:
+            return last_hash
+        if not self.path.exists():
+            return self.GENESIS
+        last_line = None
+        with open(self.path, encoding="utf-8") as f:
+            for line in f:
+                if line.strip():
+                    last_line = line
+        if last_line is None:
+            return self.GENESIS
+        try:
+            rec = json.loads(last_line)
+            if rec.get("entry_hash"):
+                return rec["entry_hash"]
+        except Exception:
+            pass
+        return "LEGACY:" + hashlib.sha256(
+            last_line.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _entry_hash(record: dict) -> str:
+        payload = "|".join([
+            record.get("prev_hash", ""),
+            record.get("time", ""),
+            record.get("event", ""),
+            record.get("result", ""),
+            record.get("detail", ""),
+        ])
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+    def _write_checkpoint(self, count: int, last_hash: str) -> None:
+        tmp = self._checkpoint_path().with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"count": count, "last_hash": last_hash},
+                       ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, self._checkpoint_path())
 
     def append(self, event: str, result: str, detail: str = "") -> dict:
         record = {
@@ -67,9 +135,17 @@ class EventLog:
             "event": event,
             "result": result,
             "detail": detail,
+            "prev_hash": self._last_hash(),
         }
+        record["entry_hash"] = self._entry_hash(record)
         with open(self.path, "a", encoding="utf-8") as f:
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                actual = sum(1 for line in f if line.strip())
+        except Exception:
+            actual = self._read_checkpoint()[0] + 1
+        self._write_checkpoint(actual, record["entry_hash"])
         return record
 
     def read_all(self) -> list[dict]:
@@ -82,6 +158,61 @@ class EventLog:
                 if line:
                     records.append(json.loads(line))
         return records
+
+    def verify(self) -> dict:
+        """校验审计链。返回 {"ok": bool, "issues": [...], "count": int}。
+
+        issues 可能的值：legacy_entry_at:<i>（旧记录，无哈希，不可验证）、
+        chain_break_at:<i>（prev_hash 与上一条不符）、
+        hash_mismatch_at:<i>（本条内容哈希不符）、
+        truncated:log=N,checkpoint=M（条数少于检查点，尾部丢失）、
+        checkpoint_stale:log=N,checkpoint=M（日志比检查点多，检查点滞后）、
+        last_hash_mismatch（末尾哈希与检查点不符）、
+        checkpoint_missing（检查点丢失，无法确认完整性）、
+        log_unreadable:<err>（日志无法解析）。
+        """
+        issues: list[str] = []
+        if not self.path.exists():
+            return {"ok": False, "issues": ["log_missing"], "count": 0}
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                raw_lines = [line for line in f if line.strip()]
+            records = [json.loads(line) for line in raw_lines]
+        except Exception as exc:
+            return {"ok": False, "issues": [f"log_unreadable:{exc}"], "count": 0}
+        prev = self.GENESIS
+        for idx, rec in enumerate(records):
+            if not rec.get("entry_hash"):
+                issues.append(f"legacy_entry_at:{idx}")
+                prev = "LEGACY:" + hashlib.sha256(
+                    raw_lines[idx].encode("utf-8")).hexdigest()
+                continue
+            if rec.get("prev_hash") != prev:
+                issues.append(f"chain_break_at:{idx}")
+            if rec.get("entry_hash") != self._entry_hash(rec):
+                issues.append(f"hash_mismatch_at:{idx}")
+            prev = rec["entry_hash"]
+        cp_path = self._checkpoint_path()
+        if not cp_path.exists():
+            if records:
+                issues.append("checkpoint_missing")
+        else:
+            try:
+                data = json.loads(cp_path.read_text(encoding="utf-8"))
+                cp_count, cp_last = int(data["count"]), str(data["last_hash"])
+            except Exception as exc:
+                issues.append(f"checkpoint_unreadable:{exc}")
+                cp_count, cp_last = -1, ""
+            if cp_count >= 0:
+                if len(records) > cp_count:
+                    issues.append(
+                        f"checkpoint_stale:log={len(records)},checkpoint={cp_count}")
+                elif len(records) < cp_count:
+                    issues.append(
+                        f"truncated:log={len(records)},checkpoint={cp_count}")
+                elif records and records[-1].get("entry_hash") != cp_last:
+                    issues.append("last_hash_mismatch")
+        return {"ok": not issues, "issues": issues, "count": len(records)}
 
 
 class TaskStore:
