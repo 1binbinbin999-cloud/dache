@@ -5,8 +5,12 @@
 - 权限检查在工具执行前，不在工具内部：拒绝的调用不执行，只记审计。
 - 拒绝的依据按顺序：不在 allowed_tools 里 -> 在 denied_tools 里 -> destructive
   一律拒绝（P3 还没有审批机制）-> external 且 network_calls_allowed 为 false。
-- 每次调用都记审计：允许的记 tool_call，拒绝的记 tool_denied，含工具名、
-  参数 hash、结果 hash、耗时。参数原文不进审计（避免把敏感内容写进日志）。
+- 每次调用都记审计：允许的记 tool_call，拒绝的记 tool_denied，执行异常记
+  tool_error，含工具名、参数 hash、结果 hash、耗时。参数原文不进审计
+  （避免把敏感内容写进日志）。
+- 异常分类（P6-7，先定义再使用）：invalid_input = 参数不是 dict 或参数值
+  类型非法（调用方传错了参数，工具未执行）；call_error = 工具执行本身
+  抛异常。审计写入失败不掩盖工具结果，在返回里以 audit_write_failed 标记。
 - 网关只调度，不自己做业务：读任务、记忆、路由分别调 Core / MemoryStore / Router。
 
 不联网，不 import 任何模型供应商 SDK。
@@ -36,9 +40,13 @@ def _hash(obj) -> str:
     return hashlib.sha256(json.dumps(obj, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
 
 
-def _args_summary(args: dict) -> dict:
+def _args_summary(args) -> dict:
     """审计脱敏摘要（P3 待定项，P4 定案）：只记参数键名，不记值。
-    既能事后排查“当时传了哪些参数”，又不把敏感内容写进日志。"""
+    既能事后排查“当时传了哪些参数”，又不把敏感内容写进日志。
+    非 dict 参数返回空键名，不抛异常（P6-7：旧代码对 list 调 .keys()
+    抛 AttributeError 且无审计，G1）。"""
+    if not isinstance(args, dict):
+        return {"keys": []}
     return {"keys": sorted(args.keys())}
 
 
@@ -71,34 +79,84 @@ class Gateway:
             return False, "external_requires_network"
         return True, "ok"
 
+    def _audit_event(self, event: str, result: str, detail: dict) -> bool:
+        """写一条审计事件；写入失败返回 False（调用方在结果里标记，
+        不抛异常、不掩盖工具结果，P6-7）。"""
+        try:
+            self.event_log.append(
+                event, result, json.dumps(detail, ensure_ascii=False))
+            return True
+        except Exception:
+            return False
+
+    def _dispatch_error(self, tool: str, args: dict, actor: str,
+                        start: float, error_class: str, exc: Exception) -> dict:
+        """分发异常：记 tool_error 审计，返回 error 结果（不抛异常；
+        调用方按 decision=error 处理，见 planner.run 的 P6-7 分支）。"""
+        latency_ms = int((time.monotonic() - start) * 1000)
+        detail = {"tool": tool, "error_class": error_class,
+                  "error": f"{type(exc).__name__}: {exc}",
+                  "actor": actor, "args_hash": _hash(args),
+                  "args_summary": _args_summary(args),
+                  "latency_ms": latency_ms}
+        audit_ok = self._audit_event("tool_error", "error", detail)
+        out = {"tool": tool, "decision": "error",
+               "reason": f"{error_class}:{exc}", "executed": False}
+        if not audit_ok:
+            out["audit_write_failed"] = True
+        return out
+
     def execute(self, tool: str, args: dict | None = None, actor: str = "user") -> dict:
         args = args or {}
         start = time.monotonic()
+        # P6-7：args 非 dict 直接 denied 并记 tool_error（invalid_input）。
+        # 旧代码在 _args_summary 里对 list 调 .keys() 抛 AttributeError 且无审计（G1）。
+        if not isinstance(args, dict):
+            detail = {"tool": tool, "error_class": "invalid_input",
+                      "reason": "args_not_object", "actor": actor,
+                      "latency_ms": int((time.monotonic() - start) * 1000)}
+            audit_ok = self._audit_event("tool_error", "error", detail)
+            out = {"tool": tool, "decision": "denied",
+                   "reason": "args_must_be_object", "executed": False}
+            if not audit_ok:
+                out["audit_write_failed"] = True
+            return out
         allowed, reason = self.check(tool)
         latency_ms = int((time.monotonic() - start) * 1000)
         if not allowed:
-            self.event_log.append(
+            audit_ok = self._audit_event(
                 "tool_denied", "denied",
-                json.dumps({"tool": tool, "reason": reason, "actor": actor,
-                            "args_hash": _hash(args),
-                            "args_summary": _args_summary(args),
-                            "latency_ms": latency_ms},
-                           ensure_ascii=False),
-            )
-            return {"tool": tool, "decision": "denied", "reason": reason,
-                    "executed": False}
-        result = self._dispatch(tool, args)
+                {"tool": tool, "reason": reason, "actor": actor,
+                 "args_hash": _hash(args),
+                 "args_summary": _args_summary(args),
+                 "latency_ms": latency_ms})
+            out = {"tool": tool, "decision": "denied", "reason": reason,
+                   "executed": False}
+            if not audit_ok:
+                out["audit_write_failed"] = True
+            return out
+        try:
+            result = self._dispatch(tool, args, actor)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            # 输入非法类异常：参数值类型错误（如 confidence="abc" 的 float 转换，G1）
+            return self._dispatch_error(tool, args, actor, start,
+                                        "invalid_input", exc)
+        except Exception as exc:
+            # 调用异常：工具执行本身失败
+            return self._dispatch_error(tool, args, actor, start,
+                                        "call_error", exc)
         latency_ms = int((time.monotonic() - start) * 1000)
-        self.event_log.append(
+        audit_ok = self._audit_event(
             "tool_call", "ok",
-            json.dumps({"tool": tool, "actor": actor, "args_hash": _hash(args),
-                        "args_summary": _args_summary(args),
-                        "result_hash": _hash(result), "latency_ms": latency_ms},
-                       ensure_ascii=False),
-        )
-        return {"tool": tool, "decision": "allowed", "executed": True, "result": result}
+            {"tool": tool, "actor": actor, "args_hash": _hash(args),
+             "args_summary": _args_summary(args),
+             "result_hash": _hash(result), "latency_ms": latency_ms})
+        out = {"tool": tool, "decision": "allowed", "executed": True, "result": result}
+        if not audit_ok:
+            out["audit_write_failed"] = True
+        return out
 
-    def _dispatch(self, tool: str, args: dict) -> dict:
+    def _dispatch(self, tool: str, args: dict, actor: str = "user") -> dict:
         if tool == "list_tasks":
             self.core.store.init()
             return {"tasks": self.core.store.list_tasks()}

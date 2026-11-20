@@ -169,6 +169,17 @@ class Planner:
                     conn.commit()
                 return {"decision": "denied", "id": plan_id, "denied_step": step_id,
                         "reason": result.get("reason")}
+            if result["decision"] == "error":
+                # P6-7：网关执行异常（已记 tool_error 审计）按失败处理，
+                # 不再当成 done（旧代码只有 denied 分支，error 会被误标 done）。
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute("UPDATE plan_steps SET status='failed' WHERE id = ?",
+                                 (step_id,))
+                    conn.execute("UPDATE plans SET status='failed', updated_at=?"
+                                 " WHERE id = ?", (now_iso(), plan_id))
+                    conn.commit()
+                return {"decision": "failed", "id": plan_id, "failed_step": step_id,
+                        "error": result.get("reason")}
             # 执行成功：记结果 hash；记忆写入被 gate 隔离时，步骤仍算 done
             #（网关放行了，隔离是记忆层的事，见 P3 测试 5），但在结果里标出来
             from gateway import _hash

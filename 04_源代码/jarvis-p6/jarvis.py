@@ -196,6 +196,15 @@ def main(argv: list[str] | None = None) -> int:
         try:
             tool_args = json.loads(args.args_json)
         except json.JSONDecodeError as exc:
+            # P6-7：非法 args-json 也记审计（旧代码只返回 denied，不写审计，G1）。
+            try:
+                core.event_log.append(
+                    "tool_error", "error",
+                    json.dumps({"tool": args.tool, "error_class": "invalid_input",
+                                "reason": f"bad_args_json:{exc}", "actor": "user"},
+                               ensure_ascii=False))
+            except Exception:
+                pass
             print(json.dumps({"decision": "denied", "reason": f"bad_args_json:{exc}"},
                              ensure_ascii=False, indent=2))
             return 1
@@ -221,6 +230,15 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 steps = json.loads(args.steps_json)
             except json.JSONDecodeError as exc:
+                # P6-7：参数解析异常记审计（与 tool-call 的非法 args-json 同类）。
+                try:
+                    core.event_log.append(
+                        "plan_error", "error",
+                        json.dumps({"error_class": "invalid_input",
+                                    "reason": f"bad_steps_json:{exc}",
+                                    "actor": "user"}, ensure_ascii=False))
+                except Exception:
+                    pass
                 print(json.dumps({"decision": "rejected", "reason": f"bad_steps_json:{exc}"},
                                  ensure_ascii=False, indent=2))
                 return 1

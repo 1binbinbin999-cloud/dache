@@ -27,12 +27,13 @@ except ImportError as exc:  # 明确报错，不静默降级
 from memory import MemoryStore
 
 # P0 显式禁止的 import：任何模型供应商 SDK 都不得出现。
-# health 检查会用 grep + sys.modules 双重验证。
+# health 检查用 sys.modules 验证已加载模块（P6-14 更正：旧注释说的
+# “grep + sys.modules 双重验证”只有后者，全文无 grep）。
 FORBIDDEN_MODULE_PREFIXES = (
     "openai",
     "anthropic",
     "google.generativeai",
-    "google-genai",
+    "google.genai",
     "litellm",
     "langchain",
     "langgraph",
@@ -151,7 +152,13 @@ class Core:
         return self.config
 
     def _check_forbidden_imports(self) -> list[str]:
-        loaded = [m for m in sys.modules if m.split(".")[0] in FORBIDDEN_MODULE_PREFIXES]
+        # P6-14：按完整点分前缀匹配（m == p 或 m 以 p + "." 开头）。
+        # 旧代码用 m.split(".")[0] 查表，google.generativeai 的首段是
+        # google，永远匹配不上，google 系供应商完全漏检。
+        # 注：光 import google（命名空间包）仍不命中，可接受。
+        loaded = [m for m in sys.modules
+                  for p in FORBIDDEN_MODULE_PREFIXES
+                  if m == p or m.startswith(p + ".")]
         return loaded
 
     def boot(self) -> dict:
@@ -194,7 +201,13 @@ class Core:
         }
 
     def health(self) -> dict:
-        """健康检查：配置、数据库、记忆表、事件日志、策略、禁 import。"""
+        """健康检查：配置、数据库、记忆表、事件日志、策略、禁 import。
+
+        P6-14（init/health 分离）：纯只读检查，不调会播种的 store.init()
+        （旧代码调 init() 会复活被删的种子任务）；任务数只要求
+        >= 种子数（合法增长不误报，旧代码 == 判等，多一条任务就 fail）；
+        事件日志只读解析，不写 health 事件。
+        """
         checks: dict[str, bool] = {}
         try:
             config = self.load_config()
@@ -204,18 +217,21 @@ class Core:
             checks["config_exists"] = False
             checks["model_disabled"] = False
         try:
-            count = self.store.init()
-            self.memory.init()
-            checks["database_readable"] = count == len(SEED_TASKS)
+            # 只读连接：库文件不存在时直接失败，不创建文件、不建表、不播种
+            uri = self.db_path.resolve().as_uri() + "?mode=ro"
+            with sqlite3.connect(uri, uri=True) as conn:
+                count = conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0]
+                conn.execute("SELECT COUNT(*) FROM memory_facts").fetchone()
+            checks["database_readable"] = count >= len(SEED_TASKS)
             checks["memory_tables_ok"] = True
         except Exception:
             checks["database_readable"] = False
             checks["memory_tables_ok"] = False
         try:
-            self.event_log.append("health", "ok", "")
-            checks["event_log_writable"] = True
+            self.event_log.read_all()
+            checks["event_log_readable"] = True
         except Exception:
-            checks["event_log_writable"] = False
+            checks["event_log_readable"] = False
         checks["no_forbidden_imports"] = len(self._check_forbidden_imports()) == 0
         ok = all(checks.values())
         return {"status": "ok" if ok else "fail", "checks": checks}

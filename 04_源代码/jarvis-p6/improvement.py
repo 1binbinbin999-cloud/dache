@@ -486,7 +486,45 @@ class ImprovementStore:
             conn.commit()
         self._set_status(proposal_id, "rolled_back")
         self._audit("improvement_rolled_back", "ok", {"id": proposal_id})
-        return {"decision": "rolled_back", "id": proposal_id}
+        synced = self._sync_rollback_state(proposal["target_file"])
+        return {"decision": "rolled_back", "id": proposal_id,
+                "state_synced": synced}
+
+    def _sync_rollback_state(self, target_file: str) -> list[str]:
+        """回滚后状态同步（P6-8）：同一目标文件上仍标 active 的部署，
+        若其改动已不在文件里（被本次回滚带走），同步修正状态为 rolled_back。
+        正常流程下拒绝规则已拦住更晚部署，这里是纵深防御，通常为空。
+        改动是否在场：new_text 在文件里（删除类提案 new_text 为空时，
+        以 old_text 已不在文件里为准）。"""
+        synced: list[str] = []
+        target = self._resolve_target(target_file)
+        if target is None or not target.exists():
+            return synced
+        content = target.read_text(encoding="utf-8")
+        with sqlite3.connect(self.db_path) as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT d.id AS dep_id, d.proposal_id, p.new_text, p.old_text"
+                " FROM deployments d JOIN proposals p ON p.id = d.proposal_id"
+                " WHERE p.target_file = ? AND d.rolled_back = 0",
+                (target_file,),
+            ).fetchall()
+        for row in rows:
+            if row["new_text"]:
+                present = row["new_text"] in content
+            else:
+                present = row["old_text"] not in content
+            if not present:
+                with sqlite3.connect(self.db_path) as conn:
+                    conn.execute("UPDATE deployments SET rolled_back=1 WHERE id = ?",
+                                 (row["dep_id"],))
+                    conn.commit()
+                self._set_status(row["proposal_id"], "rolled_back")
+                self._audit("improvement_rollback_state_synced", "ok",
+                            {"id": row["proposal_id"],
+                             "reason": "deployed change no longer in file after rollback"})
+                synced.append(row["proposal_id"])
+        return synced
 
     def monitor(self, proposal_id: str) -> dict:
         """监控：部署后跑 boot + health + 写时 gate 探针，报告是否健康。
