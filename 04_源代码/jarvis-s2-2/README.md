@@ -6,7 +6,7 @@
 ## 怎么跑
 
 ```bash
-cd Jarvis/04_源代码/jarvis-s2-1
+cd Jarvis/04_源代码/jarvis-s2-2
 pip install -r requirements.txt   # 唯一依赖：PyYAML==6.0.1
 python3 jarvis.py boot
 python3 jarvis.py health
@@ -41,7 +41,7 @@ live 映射与切换链（config.yaml model 一节）：
   全失败仍按 P6-15 返回 embedding-unavailable）+ `probe_all()`。
   `ProviderError` 的定义移至 adapters.py，这里重新导出。
 - `core.py`：boot 与 health 改为模式一致校验（stub=模型关+不联网，live=模型开+联网许可）。
-- `config.yaml`：版本 0.7.0-s2-1；providers / live_logical_models / fallback_chain
+- `config.yaml`：版本 0.8.0-s2-2；providers / live_logical_models / fallback_chain
   / embedding_fallback_chain 定义见文件内注释。
 - `jarvis.py`：新增 `provider-status` 命令（无推理成本，不耗额度）；S2-2 新增 `usage-audit` 命令（只读审计）与 router-call 的 usage_log 传入。
 - `usage.py`：新增。UsageLog（data/usage.jsonl，JSONL 追加写，与事件日志同一信封口径，无哈希链——见局限）与 audit_usage_log（逐条比对 token 与后端 usage，费用恒 $0 断言）。
