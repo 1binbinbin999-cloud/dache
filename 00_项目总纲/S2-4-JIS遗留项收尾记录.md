@@ -15,7 +15,7 @@
 | 合计 | 23 | 23（20 + 1 + 2 = 23，账平） |
 
 - 闭环 8 项：JIS-010、013、015、017、018、021、022、023。
-- 仍敞口 2 项：JIS-007、JIS-016——共同原因：验收条件要求用户定阈值（007 要拦截率与误拦率双指标阈值；016 要人工评价通过率阈值），用户尚未定；本轮只交实测数与原文，不自评通过。
+- 仍敞口 2 项：JIS-007、JIS-016。JIS-007 阈值用户 2026-11-21 11:22 已定（拦截≥80%、误拦≤10%），当前实测未达标；JIS-016 用户 2026-11-21 13:20 判不通过（人工评价严格 1/10、宽松 4/10，0.5b 拆分不可用），继续敞口，下一轮换更大模型或改提示词重测。
 
 ## 二、逐项表
 
@@ -25,7 +25,7 @@
 | 010 | 10 次真实 Ollama 调用抽查，审计 token 与后端 usage 一致 | test_20：5 chat（含中文提示词）+ 5 embedding，audit ok，total=10，mismatches=[]，链 verified；中文提示词 tokens_in > 1 | **闭环** |
 | 013 | destructive 工具接入批准流程：申请→批准→一次消费→执行，审计链含批准 id 与批准人；未批准仍拒；批准绑定参数哈希；越界路径拒删 | tests 1–5：未批准拒删且文件 intact；批准后删 + 审计链 + 二次使用被拒；参数不符被拒；目录外路径被拒；计划步骤持批准可删 | **闭环**（注：走的是工具批准流 request/approve/consume，不是 P5 六步代码改进流；destructive 调用是运行时操作，不是代码改动） |
 | 015 | `sandbox-check-full`：断网命名空间内 boot + 记忆写 + 召回 + 导出，真实库无泄漏；`run_offline` 补资源上限（P6 遗留之一） | test_6：4 步全过；真实库召回“沙箱演练事实”为空 | **闭环**（按验收条件；实体机重跑属 S2-5） |
-| 016 | `plan-decompose`（模型拆分 + 白名单校验）+ 10 目标本地探查，原文存档 | §五：10/10 decomposed；原文见 `tests/data/decompose-probe-10-goals.jsonl`（12 行，含 2 次执行抽查） | **仍敞口**：人工评价与阈值待用户定；本轮不自评通过/不通过 |
+| 016 | `plan-decompose`（模型拆分 + 白名单校验）+ 10 目标本地探查，原文存档 | §五：10/10 decomposed；原文见 `tests/data/decompose-probe-10-goals.jsonl`（12 行，含 2 次执行抽查） | **仍敞口**：用户 2026-11-21 13:20 判不通过（人工评价严格 1/10、宽松 4/10，0.5b 拆分不可用），下一轮换更大模型或改提示词重测 |
 | 017 | `plan-resume`：retry / skip / retry-args；已 done 步骤不重跑（结果 hash 不变），`plan_resumed` 审计 | tests 7–9：retry-args 改参后续跑成功；skip 后计划 done、坏事实未写入；已完成计划续跑被拒 `nothing_to_resume` | **闭环** |
 | 018 | 每步 `gate_result` + 任务 `gate_summary`（written/quarantined/needs_review/already_exists）；被隔离步骤不记“已写入” | test_10：好事实 written、注入事实 quarantined；召回只含好事实 | **闭环** |
 | 021 | 多文件提案（`changes_json`，每文件独立备份/部署行/回滚）；重复目标与坏改动在提案时即拒 | tests 11–13：双文件提案走完 propose→test→approve→deploy→rollback，两文件均恢复；重复目标拒；坏改动拒且另一文件未被改 | **闭环** |
@@ -94,7 +94,7 @@
 - 目标 1、7、9 的 router-call 参数是模型自创的结构（如 `{"command": "call", "arguments": {...}}`），不是网关 router-call 用的 `{logical, prompt}`。
 - 目标 3 的 memory-add 参数缺必填字段（无 text/type/confidence/evidence_grade/source/id）。
 - 执行抽查（探查副本，默认离线）：目标 4 的拆分计划（单步 list_tasks）跑通，decision=done；目标 1 的拆分计划（router-call 步）被网关拒绝，decision=denied，reason=`external_requires_network`——网关策略：external 工具须 `network_allowed`，仅 stub 模式的 router-call 例外放行（`gateway.py:83-86`）；live 模式默认离线即拒。拆分出的计划能否在 live 下跑、要不要给计划执行开网络，是设计问题，本轮不定。
-- 还差什么：用户人工评价 10 个目标的拆分质量 + 定通过率阈值。评价与阈值都没有，本项不闭环。
+- 用户 2026-11-21 13:20 已判：人工评价严格 1/10（仅 #4 全对）、宽松 4/10，0.5b 拆分不可用，判不通过；本项继续敞口，下一轮换更大模型或改提示词重测（阈值待下一轮再定）。
 
 ## 六、JIS-010 实测细节（闭环）
 
