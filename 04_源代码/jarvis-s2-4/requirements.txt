@@ -1,0 +1,4 @@
+# Jarvis S2-1 依赖（唯一新增依赖）
+# PyYAML 用于真解析 config.yaml，解决 P0“最小文本检查”的遗留问题。
+# 实体电脑部署时：pip install -r requirements.txt
+PyYAML==6.0.1
