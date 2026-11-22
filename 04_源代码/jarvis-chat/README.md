@@ -75,5 +75,12 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 本次无 apt 锁问题：开机时没有系统进程占着 apt 锁；且 zstd 已装（/usr/bin/zstd），完全没走 apt。
 - 其余步骤与第 9 次相同：本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，建 ollama 用户（uid 999，video/render 组）+ systemd 服务 + 代理 drop-in，模型权重从 ~/.ollama/models 拷到 /usr/share/ollama/.ollama/models 并 chown -R ollama:ollama。
 - 验证：/health ok=true、model_present=true；/chat 实测“你好，请用一句话介绍你自己”→“我是阿里云自主研发的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 8.0s，$0）。
+
+## 第十二次换机重起补充（2026-11-23 约 05:06 实测）
+
+- cogentco 果然又回来了（/etc 随换机清空），须重删（已备份 `ubuntu.sources.bak-cogentco`，只留 azure）。
+- 本次无 apt 锁问题：开机时没有系统进程占着 apt 锁；且 zstd 已装（/usr/bin/zstd），完全没走 apt。
+- 其余步骤与第 9/11 次相同：本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，建 ollama 用户（uid 999，video/render 组）+ systemd 服务 + 代理 drop-in，模型权重从 ~/.ollama/models 拷到 /usr/share/ollama/.ollama/models 并 chown -R ollama:ollama。
+- 验证：/health ok=true、model_present=true；/chat 实测“你好，请用一句话介绍你自己”→“我是来自阿里云的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 4.9s，$0）。
 ```
 
