@@ -35,5 +35,13 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 模型是 qwen2.5:0.5b（小模型，S2-1/S2-2 验证用的那个），回复会比较简单；JIS-016 已判它拆分目标不可用。想聊得好需换更大模型或接 Gemini（免费层 RPD 20/天，需从 AI Studio 取 Key）。
 - 服务是后台进程，虚拟机更换后会停，须按上面第 2 步重起；代码在 GitHub（dache）有备份，重起只须重装 Ollama + 拉模型 + 起服务，不用重写代码。
 - 持久化（systemd 服务、开机自启）待后续做。
+
+## 验证记录（2026-11-22）
+
+- Ollama 0.40.17 已装；`ollama serve` 在跑；qwen2.5:0.5b 已拉（397MB）。
+- `/health`：ollama_local ok=true、reachable、model_present=true。
+- `/chat` 实测（curl）：“你好，你是谁？”→ 模型回“我是阿里云的Qwen模型，我叫通义千问……”（model=ollama-local，tokens 34/56，耗时 7.1s，$0）。
+- 聊天应用「Jarvis 聊天」端到端实测（sendmessage 动作）：“你好，请用一句话介绍你自己”→“我是来自阿里云的超大规模语言模型，我叫通义千问。”（status=ok，model=ollama-local，耗时 1.1s）。
+- 结论：虚拟机内部署已验证能用。模型是 0.5b 小模型，回复简单；想聊得好需换更大模型或接 Gemini。
 ```
 
