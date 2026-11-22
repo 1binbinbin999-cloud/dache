@@ -51,5 +51,13 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - `/chat` 实测（curl）：“你好，你是谁？”→ 模型回“我是阿里云的Qwen模型，我叫通义千问……”（model=ollama-local，tokens 34/56，耗时 7.1s，$0）。
 - 聊天应用「Jarvis 聊天」端到端实测（sendmessage 动作）：“你好，请用一句话介绍你自己”→“我是来自阿里云的超大规模语言模型，我叫通义千问。”（status=ok，model=ollama-local，耗时 1.1s）。
 - 结论：虚拟机内部署已验证能用。模型是 0.5b 小模型，回复简单；想聊得好需换更大模型或接 Gemini。
+
+## 再次换机重起补充（2026-11-22 第五次换机实测）
+
+- apt 源里 `mirror.cogentco.com` 又慢又卡（单条索引能拖 2 分钟），update 会卡 15 分钟以上；azure 镜像本身 10 秒就完。处理：从 `/etc/apt/sources.list.d/ubuntu.sources` 的 URIs 行里删掉 cogentco 那一项（已备份 `ubuntu.sources.bak-cogentco`），只留 azure，update + 装 zstd 全程约 15 秒。
+- Ollama 官方 install.sh 是流式下载（`curl …tar.zst | zstd -d | tar`），走 ollama.com 经代理只有约 95 kB/s，1.5GB 要 100 分钟以上；中途杀掉会留半截解压（`/usr/local/bin/ollama`、`/usr/local/lib/ollama`），须先删干净再重装。
+- 快路：直接从 GitHub Releases 下同一文件（`https://github.com/ollama/ollama/releases/download/v0.40.17/ollama-linux-amd64.tar.zst`，实测约 950 kB/s–2.7 MB/s），用发布页 `sha256sum.txt` 验（期望值 `1df9d6228bac5a22e420b242708c0d10e5b886db97bab99d446a41760f4e79af`），再按 install.sh 的步骤手工装（建目录、解压到 /usr/local、建 ollama 用户、写 systemd 服务 + 代理 drop-in）。注意：`/tmp` 只有 512MB tmpfs，1.5GB 的包不要下到 /tmp，下到家目录。
+- 模型目录分裂：systemd 服务以 ollama 用户跑，模型目录是 `/usr/share/ollama/.ollama/models`；家目录 `~/.ollama/models` 里的权重服务看不到，`ollama list` 会是空的。处理：把家目录模型文件拷过去再 `chown -R ollama:ollama`（380MB，无需重新 pull），再 `systemctl restart ollama`，`ollama list` 见到 `qwen2.5:0.5b` 才算完。
+- 已验证的包留了一份在家目录：`/home/hatch/ollama-linux-amd64.tar.zst`（sha256 已验，下次换机可直接用，省下载）。
 ```
 
