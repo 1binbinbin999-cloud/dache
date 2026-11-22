@@ -32,6 +32,14 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 
 ## 已知限制
 
+- 虚拟机更换后重起 Ollama 注意代理：新虚拟机里 Ollama systemd 服务默认没有代理环境变量，`ollama pull` 会报 `tls: first record does not look like a TLS handshake`（2026-11-22 第四次换机后实测）。须先给服务加代理 drop-in 再拉模型：
+  ```bash
+  sudo mkdir -p /etc/systemd/system/ollama.service.d
+  printf '[Service]\nEnvironment="HTTP_PROXY=http://hatch-egress-proxy:3128"\nEnvironment="HTTPS_PROXY=http://hatch-egress-proxy:3128"\nEnvironment="NO_PROXY=localhost,127.0.0.1,::1"\nEnvironment="SSL_CERT_FILE=/run/hatch/egress-tls/ca-bundle.pem"\n' | sudo tee /etc/systemd/system/ollama.service.d/proxy.conf
+  sudo systemctl daemon-reload && sudo systemctl restart ollama
+  ```
+  （代理地址取自本机 `/etc/environment`，无凭证版；drop-in 在 `/etc` 下，换机后会丢，重起时须重建。）
+
 - 模型是 qwen2.5:0.5b（小模型，S2-1/S2-2 验证用的那个），回复会比较简单；JIS-016 已判它拆分目标不可用。想聊得好需换更大模型或接 Gemini（免费层 RPD 20/天，需从 AI Studio 取 Key）。
 - 服务是后台进程，虚拟机更换后会停，须按上面第 2 步重起；代码在 GitHub（dache）有备份，重起只须重装 Ollama + 拉模型 + 起服务，不用重写代码。
 - 持久化（systemd 服务、开机自启）待后续做。
