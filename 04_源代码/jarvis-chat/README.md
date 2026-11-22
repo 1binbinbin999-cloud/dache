@@ -60,5 +60,13 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 模型目录分裂：systemd 服务以 ollama 用户跑，模型目录是 `/usr/share/ollama/.ollama/models`；家目录 `~/.ollama/models` 里的权重服务看不到，`ollama list` 会是空的。处理：把家目录模型文件拷过去再 `chown -R ollama:ollama`（380MB，无需重新 pull），再 `systemctl restart ollama`，`ollama list` 见到 `qwen2.5:0.5b` 才算完。
 - 已验证的包留了一份在家目录：`/home/hatch/ollama-linux-amd64.tar.zst`（sha256 已验，下次换机可直接用，省下载）。
 - 第七次换机（2026-11-22 约 19:39）实测：cogentco 果然又回来了（/etc 随换机清空），须重删；另注意 `zstd -d 包.tar.zst` 默认写文件、不走 stdout，`zstd -d … | tar` 会拿到空输入而报错，流式解压须用 `zstd -dc`，或先解成 .tar 再 `tar -xf`。
+
+## 第九次换机重起补充（2026-11-23 约 01:51 实测）
+
+- cogentco 果然又回来了（/etc 随换机清空），须重删（已备份 `ubuntu.sources.bak-cogentco`，只留 azure）。
+- 新坑：开机后系统有个 os-intent 重放进程在跑 `apt-get update`，占着 apt 锁；它启动时源里还有 cogentco，卡在拉 cogentco 索引上 11 分钟以上。不要杀它。绕过去：zstd 直接用本地 apt 缓存里的包 `dpkg -i /var/cache/apt/archives/zstd_1.5.5+dfsg2-2build1.1_amd64.deb`（libzstd1 已装），不走 apt update。缓存（/var/cache/apt/archives，158 个 .deb）换机后还在。
+- 其余步骤与第 5/7 次相同：本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，建 ollama 用户 + systemd 服务 + 代理 drop-in，模型权重从 ~/.ollama/models 拷到 /usr/share/ollama/.ollama/models 并 chown -R ollama:ollama。
+- 注意：换机后本机没有旧服务进程，不用 pkill；`pkill -f "python3 server.py"` 的模式会匹配到执行命令自身的 shell，把自己杀掉。
+- 验证：/health ok=true、model_present=true；/chat 实测“你好，请用一句话介绍你自己”→“我是阿里云自主研发的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 5.0s，$0）。
 ```
 
