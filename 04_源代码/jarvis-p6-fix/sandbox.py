@@ -19,15 +19,20 @@ import resource
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 def _scrub_env(env: dict | None) -> dict:
-    """清掉密钥类环境变量：提案代码在沙箱里读不到真实配置与密钥。"""
+    """清掉密钥类环境变量：提案代码在沙箱里读不到真实配置与密钥。
+    另清掉 agent 运行时追踪上下文（JARVIS_TRACE_CONTEXT 等）：它含最近
+    对话与工具调用参数，04:10 对抗验证里经未隔离的 /proc 泄露过，绝不能
+    进沙箱。"""
     merged = dict(os.environ if env is None else env)
     for key in list(merged):
         upper = key.upper()
         if ("API_KEY" in upper or "OPENAI" in upper or "ANTHROPIC" in upper
+                or "TRACE_CONTEXT" in upper
                 or upper.endswith(("_KEY", "_TOKEN", "_SECRET", "_PASSWORD", "_PASSWD"))):
             del merged[key]
     merged["TMPDIR"] = "/tmp"
@@ -44,28 +49,66 @@ def _set_resource_limits() -> None:
     resource.setrlimit(resource.RLIMIT_CPU, (300, 330))
 
 
-# 沙箱启动脚本（sh -c，$1=临时复制目录，$2=真实工程目录，之后是待执行命令）。
-# 顺序不能乱：先把真实目录 bind 后 remount 只读（此时 /tmp 还可见），
-# 再把临时目录 bind 到 /mnt，最后盖掉 /tmp 与 /var/tmp。
-# 退出码 21-26 表示沙箱搭建失败（调用方不得降级为无隔离执行）。
+# 沙箱启动脚本（sh -c，$1=临时复制目录，$2=工程拷贝目录，$3=真实工程目录，
+# 之后是待执行命令）。
+# 顺序不能乱：先把工程拷贝 bind 到真实路径后 remount 只读（此时 /tmp 还可见；
+# 拷贝是一次性的，即使命名空间内把绑定 remount 成 rw，写操作也只落到拷贝上，
+# 宿主机真实目录不受影响）。根 / 是 overlayfs 挂载点，在子用户命名空间里
+# 无法 bind/remount（实测报错），故改为逐个处理顶层目录。实测规律：
+# bind 只能用于无锁定子挂载点的普通目录（/usr、/boot、/root、/srv、/media）；
+# 含锁定子挂载点的目录（/、/etc、/opt、/var、/home）bind 会失败，改盖 tmpfs
+# （新挂载不受此限；/opt、/var、/run 沙箱命令不需要，直接盖掉；/var 盖掉后
+# 需先 mkdir -p /var/tmp 再盖 /var/tmp）；/etc 保持原样（沙箱命令要读
+# /etc/passwd 等，是残留缺口）；/home 是真实工程目录的祖先，盖掉会遮住
+# 工程路径，故跳过（/home/hatch 等挂载点仍可写，残留缺口）。
+# /dev、/sys 保持原样（沙箱命令要读 /dev/null、/dev/urandom；sysfs 本就基本只读）。
+# 再把临时目录 bind 到 /mnt，盖掉 /proc（空 tmpfs；本环境禁止挂载新的 proc，
+# 故直接隐藏，沙箱内看不到任何进程），最后 cd /mnt 执行命令。
+# 退出码 21-32 表示沙箱搭建失败（调用方不得降级为无隔离执行）。
 _SANDBOX_SH = (
-    'dest="$1"; real="$2"; shift 2; '
-    'mount --bind "$real" "$real" || exit 21; '
+    'dest="$1"; copy="$2"; real="$3"; shift 3; '
+    'mount --bind "$copy" "$real" || exit 21; '
     'mount -o remount,ro,bind "$real" || exit 22; '
-    'mount --bind "$dest" /mnt || exit 23; '
-    'mount -t tmpfs tmpfs /tmp || exit 24; '
-    'mount -t tmpfs tmpfs /var/tmp || exit 25; '
-    'cd /mnt || exit 26; '
+    'mount --bind /usr /usr || exit 23; '
+    'mount -o remount,ro,bind /usr || exit 24; '
+    'mount --bind /boot /boot || exit 23; '
+    'mount -o remount,ro,bind /boot || exit 24; '
+    'mount --bind /root /root || exit 23; '
+    'mount -o remount,ro,bind /root || exit 24; '
+    'mount --bind /srv /srv || exit 23; '
+    'mount -o remount,ro,bind /srv || exit 24; '
+    'mount --bind /media /media || exit 23; '
+    'mount -o remount,ro,bind /media || exit 24; '
+    'mount -t tmpfs tmpfs /opt || exit 25; '
+    'mount -t tmpfs tmpfs /var || exit 26; '
+    'mkdir -p /var/tmp && mount -t tmpfs tmpfs /var/tmp || exit 27; '
+    'mount -t tmpfs tmpfs /run || exit 28; '
+    'mount --bind "$dest" /mnt || exit 29; '
+    'mount -t tmpfs tmpfs /tmp || exit 30; '
+    'mount -t tmpfs tmpfs /proc || exit 31; '
+    'cd /mnt || exit 32; '
+    # 用 exec 直接跑命令（不 fork）：实测本环境的 setup shell（dash 与 bash
+    # 均试过）在命名空间内 fork 会报 Cannot allocate memory（ENOMEM），
+    # 无法用 fork+wait 传信号。--fork 使沙箱进程成为新 PID 命名空间的
+    # 1 号进程；代价是信号致死会被 unshare 抹成退出码 1（见 resource_3
+    # 测试的说明），调用方只能看到 ok=False，不能直接从 returncode 分辨
+    # 崩溃与普通失败。
     'exec "$@"'
 )
 
 _SANDBOX_FAILURES = {
-    21: "bind real dir failed",
-    22: "remount real dir read-only failed",
-    23: "bind temp dir to /mnt failed",
-    24: "tmpfs on /tmp failed",
-    25: "tmpfs on /var/tmp failed",
-    26: "cd /mnt failed",
+    21: "bind project copy to real dir failed",
+    22: "remount project copy read-only failed",
+    23: "bind top-level dir failed",
+    24: "remount top-level dir read-only failed",
+    25: "tmpfs on /opt failed",
+    26: "tmpfs on /var failed",
+    27: "tmpfs on /var/tmp failed",
+    28: "tmpfs on /run failed",
+    29: "bind temp dir to /mnt failed",
+    30: "tmpfs on /tmp failed",
+    31: "tmpfs on /proc failed",
+    32: "cd /mnt failed",
 }
 
 
@@ -73,9 +116,13 @@ def run_sandboxed(base_dir: Path, dest: Path, argv: list[str],
                    timeout: int = 60, env: dict | None = None) -> dict:
     """在隔离命名空间里跑一次命令（P6，I2/I3 的对应修复）。
 
-    隔离措施：unshare 用户+挂载+网络命名空间；真实工程目录只读绑定；
+    隔离措施：unshare 用户+挂载+网络+PID 命名空间（--fork 使沙箱进程成为
+    新 PID 命名空间的 1 号进程）；真实工程目录以一次性拷贝 bind 到原路径后
+    只读（remount 成 rw 也只能写到拷贝）；顶层目录逐个 bind 后 remount 只读
+    （根 / 是 overlayfs 挂载点，子用户命名空间里无法直接 bind/remount）；
     临时复制目录 bind 到 /mnt 后在其中执行；/tmp 与 /var/tmp 盖 tmpfs；
-    断网；环境变量清密钥；资源上限。
+    盖掉 /proc（空 tmpfs；本环境禁止挂载新的 proc，故直接隐藏）；断网；环境变量清密钥；
+    资源上限。
     返回 {"mode": "unshare-ns", "ok", "returncode", "stdout", "stderr"}，
     或沙箱不可用时 {"mode": "unsupported", "ok": False, "reason": ...}。
     调用方收到 unsupported 时必须判 fail，绝不能静默降级为无隔离执行。
@@ -89,8 +136,18 @@ def run_sandboxed(base_dir: Path, dest: Path, argv: list[str],
         return {"mode": "unsupported", "ok": False, "reason": "unshare not found"}
     if not Path("/mnt").is_dir():
         return {"mode": "unsupported", "ok": False, "reason": "/mnt not available"}
-    cmd = ["unshare", "-rnm", "sh", "-c", _SANDBOX_SH, "sandbox",
-           str(dest), str(base_dir), *argv]
+    # P6-fix：先把工程目录完整拷贝到一次性临时目录，沙箱内只操作这个拷贝。
+    # 拷贝失败则 fail-closed（返回 unsupported），绝不降级为直接跑真实目录。
+    copy_root = Path(tempfile.mkdtemp(prefix="jarvis-sandbox-proj-"))
+    try:
+        proj_copy = copy_root / "proj"
+        shutil.copytree(base_dir, proj_copy)
+    except Exception:
+        shutil.rmtree(copy_root, ignore_errors=True)
+        return {"mode": "unsupported", "ok": False,
+                "reason": "project copy failed"}
+    cmd = ["unshare", "-rnmp", "--fork", "sh", "-c", _SANDBOX_SH, "sandbox",
+           str(dest), str(proj_copy), str(base_dir), *argv]
     try:
         result = subprocess.run(
             cmd, cwd=base_dir, env=scrubbed_env,
@@ -102,6 +159,8 @@ def run_sandboxed(base_dir: Path, dest: Path, argv: list[str],
     except subprocess.TimeoutExpired:
         return {"mode": "unshare-ns", "ok": False, "returncode": None,
                 "stdout": "", "stderr": "timeout", "reason": "timeout"}
+    finally:
+        shutil.rmtree(copy_root, ignore_errors=True)
     if result.returncode in _SANDBOX_FAILURES:
         return {"mode": "unsupported", "ok": False,
                 "reason": _SANDBOX_FAILURES[result.returncode],
