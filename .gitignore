@@ -2,6 +2,9 @@
 __pycache__/
 *.py[cod]
 
+# 运行时日志（不进仓库）
+*.log
+
 # Jarvis 运行时生成的数据（测试运行时自动重建，不进仓库）
 *.db
 *.db-journal
