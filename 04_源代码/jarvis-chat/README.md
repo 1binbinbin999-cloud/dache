@@ -59,5 +59,6 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 快路：直接从 GitHub Releases 下同一文件（`https://github.com/ollama/ollama/releases/download/v0.40.17/ollama-linux-amd64.tar.zst`，实测约 950 kB/s–2.7 MB/s），用发布页 `sha256sum.txt` 验（期望值 `1df9d6228bac5a22e420b242708c0d10e5b886db97bab99d446a41760f4e79af`），再按 install.sh 的步骤手工装（建目录、解压到 /usr/local、建 ollama 用户、写 systemd 服务 + 代理 drop-in）。注意：`/tmp` 只有 512MB tmpfs，1.5GB 的包不要下到 /tmp，下到家目录。
 - 模型目录分裂：systemd 服务以 ollama 用户跑，模型目录是 `/usr/share/ollama/.ollama/models`；家目录 `~/.ollama/models` 里的权重服务看不到，`ollama list` 会是空的。处理：把家目录模型文件拷过去再 `chown -R ollama:ollama`（380MB，无需重新 pull），再 `systemctl restart ollama`，`ollama list` 见到 `qwen2.5:0.5b` 才算完。
 - 已验证的包留了一份在家目录：`/home/hatch/ollama-linux-amd64.tar.zst`（sha256 已验，下次换机可直接用，省下载）。
+- 第七次换机（2026-11-22 约 19:39）实测：cogentco 果然又回来了（/etc 随换机清空），须重删；另注意 `zstd -d 包.tar.zst` 默认写文件、不走 stdout，`zstd -d … | tar` 会拿到空输入而报错，流式解压须用 `zstd -dc`，或先解成 .tar 再 `tar -xf`。
 ```
 
