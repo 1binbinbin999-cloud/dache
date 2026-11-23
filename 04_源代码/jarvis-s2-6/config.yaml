@@ -1,0 +1,139 @@
+# Jarvis S2-4 配置（确定性核心，不含任何密钥）
+# S2-4 变化：JIS 遗留项收尾——destructive 工具批准放行（JIS-013）、
+# 批准操作者与双人复核（JIS-022）、usage 日志哈希链（S2-2 遗留）。
+# router_mode 默认仍为 stub（离线安全）；live 模式见 model 一节。
+version: "0.10.0-s2-6"
+project: jarvis
+environment: cloud-simulation
+
+core:
+  boot_order:
+    - config
+    - database
+    - policy
+    - audit
+    - scheduler
+  # P0 不加载任何模型
+  model_enabled: false
+
+database:
+  path: data/jarvis.db
+  # 种子任务只在库为空时写入一次，INSERT OR IGNORE 保证幂等
+  seed_on_first_boot: true
+
+audit:
+  event_log: data/events.jsonl
+  # 追加写，不可改；每条记录含时间、事件、结果
+  append_only: true
+
+memory:
+  schema_version: memory-facts-v1
+  # 写时 gate 阈值：置信度 <0.3 进隔离区；高置信度 + 单次证据只能是 provisional，需复核
+  min_confidence: 0.3
+  # 提取：P1 只用规则 + 模板，不调 LLM
+  extraction: rule_template
+  # 修正：旧事实标 superseded，不删除；Correction 记录保留历史
+  correction_keeps_history: true
+
+policy:
+  # P3：网关允许的工具。允许哪个只改这里，不改代码。
+  # read 类：list_tasks / read_task / memory-recall；write 类：memory-add；
+  # external 类：router-call 只在 Stub 模式下放行（不产生真实外部调用）。
+  allowed_tools:
+    - list_tasks
+    - read_task
+    - memory-recall
+    - memory-add
+    - router-call
+  denied_tools:
+    - write_file
+    - delete_file
+    - send_email
+    - external_api_call
+  network_calls_allowed: false
+
+gateway:
+  # 权限检查在执行前；拒绝的调用不执行，只记审计。
+  check_before_execute: true
+  # destructive 一律拒绝，除非持有有效批准（S2-4，JIS-013）：
+  # 先 tool-approval-request 申请、tool-approval-approve 显式批准，
+  # 再以 approval_id 调 tool-call；一次批准只放行一次调用。
+  destructive_always_denied: true
+
+approval:
+  # 批准记录操作者与时间（JIS-022）：操作者取 JARVIS_OPERATOR
+  # 环境变量，否则系统用户名。
+  # dual_review：双人复核。默认 false（单人单机，一次批准即生效）；
+  # 多人使用时改为 true，须两名不同操作者批准才生效，同一操作者
+  # 批两次不算；规则见 improvement.py 与 README。
+  dual_review: false
+
+sandbox:
+  # 真断网演练：unshare -rn 创建无网络接口的命名空间。
+  method: unshare
+  probe_host: 8.8.8.8
+  probe_port: 53
+
+model:
+  # S2-1：直接适配器（第 5 题 A + 第 6 题：Ollama 本地 + Gemini 免费层，
+  # 不用 LiteLLM）。router_mode 默认仍为 stub（离线安全，全量回归的
+  # 默认状态）；改为 live 才走真实适配器。逻辑模型名 -> 供应商名，
+  # 换模型只改这里，不改业务代码。Key 只从环境变量读，不进本文件。
+  router_enabled: true
+  router_mode: stub
+  litellm_proxy_enabled: false
+  logical_models:
+    fast: stub-fast
+    capable: stub-capable
+    reasoning: stub-reasoning
+    local: stub-local
+    embedding: stub-embedding
+  # live 模式下的映射（router_mode: live 时生效）。
+  live_logical_models:
+    fast: gemini-flash
+    capable: gemini-flash
+    reasoning: gemini-flash
+    local: ollama-local
+    embedding: ollama-embedding
+  # live 模式切换链：Gemini -> 本地 Ollama -> Stub（离线底）。
+  # Groq / OpenRouter 只留桩位（S2-1 不实现）；fallback 链完整形态
+  # 为 Gemini -> Groq -> OpenRouter:free -> 纯本地，见 Step 0 报告。
+  fallback_chain:
+    - gemini-flash
+    - ollama-local
+    - stub-local
+  embedding_fallback_chain:
+    - ollama-embedding
+    - stub-embedding
+  # 供应商定义：type 决定适配器类；status: not_implemented 为桩位。
+  providers:
+    gemini-flash:
+      type: gemini
+      model: gemini-3.6-flash
+      timeout_s: 60
+      retry_max: 1
+      retry_backoff_s: 2
+      # S2-6：maxOutputTokens 原硬编码 1024，改由配置控制（见 adapters.py）。
+      max_tokens: 2048
+      # S2-4：Retry-After 上限 30s（服务端要求退避过长时截断）。
+      retry_backoff_max_s: 30
+    ollama-local:
+      type: ollama
+      model: qwen2.5:0.5b
+      host: http://localhost:11434
+      timeout_s: 120
+      retry_max: 0
+      # S2-6：num_predict 原硬编码 512，改由配置控制（见 adapters.py）。
+      max_tokens: 1024
+    ollama-embedding:
+      type: ollama
+      model: nomic-embed-text
+      host: http://localhost:11434
+      timeout_s: 60
+      retry_max: 0
+    groq-gpt-oss:
+      type: groq
+      status: not_implemented
+    openrouter-free:
+      type: openrouter
+      status: not_implemented

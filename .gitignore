@@ -22,3 +22,6 @@ data/backups/
 !04_源代码/jarvis-s2-5/tests/data/decompose-probe-s2-5-b-7b.jsonl
 # S2-5 (c) Gemini 对照探查原文同理特许提交
 !04_源代码/jarvis-s2-5/tests/data/decompose-probe-s2-5-c-gemini.jsonl
+# S2-6 探查原文同理特许提交
+!04_源代码/jarvis-s2-6/tests/data/decompose-probe-s2-6-a-prompt-0.5b.jsonl
+!04_源代码/jarvis-s2-6/tests/data/decompose-probe-s2-6-b-7b.jsonl
