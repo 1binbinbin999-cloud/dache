@@ -84,3 +84,10 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 验证：/health ok=true、model_present=true；/chat 实测“你好，请用一句话介绍你自己”→“我是来自阿里云的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 4.9s，$0）。
 ```
 
+
+## 第十三次换机重起补充（2026-11-23 约 07:32 实测，S2-5 轮中恢复）
+
+- Ollama 二进制已失，本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，Ollama 0.40.17；建 ollama 用户（uid 999，video/render 组）+ systemd 服务 + 代理 drop-in；权重从 ~/.ollama/models 拷到 /usr/share/ollama/.ollama/models 并 chown -R ollama:ollama。`ollama list`：qwen2.5:0.5b a8b0c5157701、qwen2.5:7b 845dbda0ea48（4.7GB，约 24 分钟，$0）、nomic-embed-text 0a109f422b47（与 S2-4 digest 一致）。
+- 本次无 README 没写的新坑：zstd 已装、开机无 apt 锁进程；cogentco 仍在源里，但全程没走 apt，所以没删——下次如需 apt 仍须按 README 重删。
+- 新情况：根盘 overlay 仅 7.5G，拉 nomic 时报 ENOSPC（剩 12M），回归中途一度 100%（剩 64K）。已清：apt lists（198M）、非 zstd 的 deb（约 98M，zstd deb 保留）、apt pkgcache（114M）、ffmpeg 文档源码包（12M）、未用的 cuda_v12 库目录（1.3G；本机无 GPU，/dev/nvidia* 与 /proc/driver/nvidia 均不存在、无进程映射任何 cuda 库，删后 Ollama 照常服务，安装包是恢复路径）。现剩约 1.1G。结构性提醒：7.5G 根盘装 0.5b+7b+nomic+CUDA 库本就捉襟见肘，S2-6 部署手册的环境检查单应加磁盘空间一项。
+- 聊天服务：`nohup python3 server.py > server.log 2>&1 &` 重起（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true；/chat 实测“你好”→“你好！很高兴能与你交流。如果你有任何问题或需要帮助，请随时告诉我。”（model=ollama-local，tokens 30/19，耗时 1.7s，$0）。

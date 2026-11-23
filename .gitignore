@@ -17,3 +17,6 @@ data/backups/
 
 # S2-4 探查原文是测试证据，特许提交（其余 data/*.jsonl 仍忽略）
 !04_源代码/jarvis-s2-4/tests/data/decompose-probe-10-goals.jsonl
+# S2-5 探查原文同理特许提交
+!04_源代码/jarvis-s2-5/tests/data/decompose-probe-s2-5-a-prompt-0.5b.jsonl
+!04_源代码/jarvis-s2-5/tests/data/decompose-probe-s2-5-b-7b.jsonl
