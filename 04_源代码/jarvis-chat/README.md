@@ -107,3 +107,11 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 其余与第 14 次相同：本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，cogentco 已删（只留 azure，本次没走 apt update 也先删了），zstd 经 `dpkg-deb -x` 从本地缓存取回（未碰 dpkg 锁），建 ollama 用户（uid 999，video/render 组）+ systemd 服务 + 代理 drop-in，0.5b 家目录拷回并 `chown -R ollama:ollama`；cuda_v12/v13 + vulkan 已删（约 2.4G），apt lists 已清。
 - 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉）、nomic-embed-text 0a109f422b47（274MB，重拉），digest 与 S2-4 一致；`ollama list` 三模型齐全。
 - 聊天服务：`nohup python3 server.py > server.log 2>&1 &` 重起（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“我是来自阿里云的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 7.9s，$0）。根盘剩 1.9G。
+
+## 第十九次换机重起补充（2026-11-23 约 19:31 实测）
+
+- 本次无新坑，老步骤一次走通：zstd 1.5.5 已装、开机无 apt 锁进程；cogentco 已删（只留 azure，备份 ubuntu.sources.bak-cogentco）；本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，Ollama 0.40.17；建 ollama 用户（uid 999，video/render 组）+ systemd 服务 + 代理 drop-in（取自 /etc/environment）；0.5b 家目录拷回并 `chown -R ollama:ollama`；cuda_v12/v13 + vulkan 已删（约 2.4G，标准步骤）。
+- 与第 15 次不同的一点：这次 tar 包解出来的 `/usr/local/lib/ollama` 权限直接就是 755（不是 770），llama-server 以 ollama 用户一次跑通（version 0.9.0-dev）；但 770 的教训仍保留——装完先以 ollama 用户跑一次 llama-server --version 再往下走。
+- 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，380M）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉，约 28 分钟，2.6 MB/s）、nomic-embed-text 0a109f422b47（274MB，重拉，约 2 分钟），digest 与 S2-4 一致；`ollama list` 三模型齐全。拉模型期间未重启 ollama 服务（第 15 次教训）。
+- 聊天服务：`nohup python3 server.py > server.log 2>&1 &` 重起（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“我是来自阿里云的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 6.4s，$0）。根盘剩 1.9G。
+- 注意：第 16/17/18 次更换的恢复未在 README 留记录（本次只补第 19 次；三轮的细节无据可写，不编）。18:11 轮曾有一次恢复在进行（7b 重拉中），被 19:31 这次换机清掉，本次从头重装。
