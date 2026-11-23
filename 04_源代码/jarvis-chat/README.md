@@ -123,3 +123,12 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 磁盘时序教训（本次新发现）：拉 7b 前根盘剩 4.2G，按剩余量算刚好不够（7b 剩余约 4.1G + nomic 0.27G），拉到一半会 ENOSPC；这次在拉取进行中先清了 cuda_v12/v13 + vulkan（约 2.4G），清之前核过运行中的 ollama 进程 maps 里无 cuda/vulkan 映射、且 /dev/nvidia* 与 /proc/driver/nvidia 均不存在，清后服务照常、拉取未断。教训：以后拉模型前先看磁盘余量，不够就先清 GPU 库再拉，不要等拉到一半再救。
 - 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，380M）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉，约 25 分钟，2.5 MB/s）、nomic-embed-text 0a109f422b47（274MB，重拉，约 2 分钟），digest 与 S2-4 一致；`ollama list` 三模型齐全。拉模型期间未重启 ollama 服务（第 15 次教训）。
 - 聊天服务：`nohup python3 server.py > server.log 2>&1 &` 重起（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“我是来自阿里云的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 8.2s，$0）。根盘剩 1.9G。
+
+## 第二十一次换机重起补充（2026-11-23 约 23:32 换机，2026-11-24 约 00:20 恢复完成）
+
+- 本次新坑：`useradd -r` 不带 `-m/-d` 不建家目录，`ollama serve` 找不到 `/home/ollama/.ollama/id_ed25519`，报 `could not create directory mkdir /home/ollama: permission denied`，服务反复重启（exit 1）。修法：`usermod -d /usr/share/ollama ollama` + `chown ollama:ollama /usr/share/ollama`，服务随即 active。教训：手工建 ollama 用户须把家目录指到 `/usr/share/ollama`（官方 install.sh 就是这么建的），否则模型目录与 HOME 分裂；装完先看 `systemctl status ollama` 是否 active，不要等 `ollama list` 连不上才查日志。
+- 其余老步骤一次走通：zstd 1.5.5 已装、开机无 apt 锁进程；cogentco 已删（只留 azure，备份 ubuntu.sources.bak-cogentco）；本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，Ollama 0.40.17；建 ollama 用户（uid 999，video/render 组）+ systemd 服务 + 代理 drop-in（取自 /etc/environment）；0.5b 家目录拷回并 `chown -R ollama:ollama`。
+- 与第 15 次不同的一点：这次 tar 包解出来的 `/usr/local/lib/ollama` 权限直接就是 755（不是 770），llama-server 以 ollama 用户一次跑通（version 0.9.0-dev）；但 770 的教训仍保留——装完先以 ollama 用户跑一次 llama-server --version 再往下走。
+- 磁盘时序（第二十次的教训这次用上了）：装完 Ollama 后根盘剩 5.0G，7b（4.7G）+ nomic（0.27G）刚好不够；这次在拉模型前先清了 cuda_v12/v13 + vulkan（约 2.4G，清之前核过运行中的 ollama 进程 maps 里无 cuda/vulkan 映射、且 /dev/nvidia* 与 /proc/driver/nvidia 均不存在），清后剩 6.8G 再拉。拉取期间未重启 ollama 服务（第 15 次教训）。
+- 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，380M）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉，约 28 分钟）、nomic-embed-text 0a109f422b47（274MB，重拉，约 10 秒），digest 与 S2-4 一致；`ollama list` 三模型齐全。注意：7b 拉取后期明显变慢（前段约 2.5 MB/s，收尾约 0.7 MB/s），partial 文件是稀疏文件、表观大小早早就到 4.68G，看 du 才是真实进度；别因表观大小不动就误判卡死、也别中途杀掉重拉。
+- 聊天服务：`nohup python3 server.py > server.log 2>&1 &` 重起（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“我是阿里云自主研发的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 5.0s，$0）。根盘剩 1.8G。
