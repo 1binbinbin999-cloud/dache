@@ -132,3 +132,12 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 磁盘时序（第二十次的教训这次用上了）：装完 Ollama 后根盘剩 5.0G，7b（4.7G）+ nomic（0.27G）刚好不够；这次在拉模型前先清了 cuda_v12/v13 + vulkan（约 2.4G，清之前核过运行中的 ollama 进程 maps 里无 cuda/vulkan 映射、且 /dev/nvidia* 与 /proc/driver/nvidia 均不存在），清后剩 6.8G 再拉。拉取期间未重启 ollama 服务（第 15 次教训）。
 - 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，380M）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉，约 28 分钟）、nomic-embed-text 0a109f422b47（274MB，重拉，约 10 秒），digest 与 S2-4 一致；`ollama list` 三模型齐全。注意：7b 拉取后期明显变慢（前段约 2.5 MB/s，收尾约 0.7 MB/s），partial 文件是稀疏文件、表观大小早早就到 4.68G，看 du 才是真实进度；别因表观大小不动就误判卡死、也别中途杀掉重拉。
 - 聊天服务：`nohup python3 server.py > server.log 2>&1 &` 重起（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“我是阿里云自主研发的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 5.0s，$0）。根盘剩 1.8G。
+
+## 第二十二次换机重起补充（2026-11-24 约 01:34 换机，约 02:20 恢复完成）
+
+- 770 又回来了：这次 tar 包解出来的 `/usr/local/lib/ollama` 权限又是 770（第 19/20/21 次都是 755 直接可用），已在起服务前 `chmod 755` 修掉，之后 ollama 用户跑 llama-server --version（0.9.0-dev）一次通过。教训不变：每次装完先看权限、先以 ollama 用户跑一次 llama-server --version 再往下走，别赌这次是不是 755。
+- useradd 这次按官方形式一次建对：`useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama`（带 `-m -d`），家目录正常建出，服务第一次起就 active；第 21 次的坑（`useradd -r` 不带 `-m/-d` 不建家目录、ollama serve 找不到 id_ed25519 反复重启）这次没重现。教训：手工建用户必须带 `-m -d /usr/share/ollama`，装完先看 `systemctl status ollama` 是否 active。
+- 其余老步骤一次走通：zstd 1.5.5 已装、开机无 apt 锁进程；cogentco 已删（只留 azure，备份 ubuntu.sources.bak-cogentco）；本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，Ollama 0.40.17；建 ollama 用户（uid 999，video/render 组）+ systemd 服务 + 代理 drop-in（取自 /etc/environment）；0.5b 家目录拷回并 `chown -R ollama:ollama`。
+- 磁盘时序（第二十次的教训）：装完 Ollama 后根盘剩 5.0G，7b（4.7G）+ nomic（0.27G）刚好不够；这次在拉模型前先清了 cuda_v12/v13 + vulkan（约 2.4G，清之前核过运行中的 ollama 进程 maps 里无 cuda/vulkan 映射、且 /dev/nvidia* 与 /proc/driver/nvidia 均不存在），清后剩 6.4G 再拉。拉取期间未重启 ollama 服务（第 15 次教训）。
+- 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，380M）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉，约 28 分钟，约 2.5 MB/s）、nomic-embed-text 0a109f422b47（274MB，重拉，约 105 秒），digest 与 S2-4 一致；`ollama list` 三模型齐全。注意：7b 的 partial 文件是稀疏文件、表观大小早早就到 4.68G，看 du 才是真实进度；别因表观大小不动就误判卡死、也别中途杀掉重拉。
+- 聊天服务：7b 拉取期间先起（只用 0.5b，不动 Ollama 服务），`nohup python3 server.py > server.log 2>&1 &`（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“我是阿里云自主研发的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 6.7s，$0）。根盘剩 1.9G。
