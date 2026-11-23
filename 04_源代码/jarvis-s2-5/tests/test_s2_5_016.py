@@ -17,9 +17,14 @@ S2-4 实测：qwen2.5:0.5b 严格 1/10（仅 #4）、宽松 4/10，用户
 - (b) 7b 结果见本文件 test_09 与 S2-5 汇报：严格 4/10
   （#2、#4、#5、#6）、宽松 8/10（#1、#2、#3、#4、#5、#6、#9、#10）；
   #7、#8 因模型输出缺最后的 } 而 unparsable（两次重跑均复现）。
+- (c) Gemini 结果见本文件 test_10 与 S2-5 汇报 §五：严格 8/10
+  （#1-#8）、宽松 8/10；#9、#10 因模型输出截断而
+  unparsable_output（与 (b) #7、#8 同类）；8 条已分解的均无方向
+  反转、无自造字段、无编造的具体内容。真实 Gemini 调用 11 次
+  （#10 限流重试 1 次），$0。
 
-全部 $0，不发真实 Gemini 请求；本文件只用假模型与已存档的探查
-原文，不依赖 Ollama。
+本文件只用假模型与已存档的探查原文，不依赖 Ollama、不发真实
+请求；（c) 探查原文是 2026-11-23 实测所得。
 """
 
 import json
@@ -214,6 +219,45 @@ class TestS25ProbeB(unittest.TestCase):
                     set(step["args"].keys()) <= REAL_ARG_KEYS[step["tool"]],
                     f"#{rec['n']} {step['tool']} 有自造字段: "
                     f"{set(step['args'].keys()) - REAL_ARG_KEYS[step['tool']]}")
+
+
+class TestS25ProbeC(unittest.TestCase):
+    """候选 (c) Gemini 探查原文结构校验（2026-11-23 实测，11 次调用）。
+
+    评分见 S2-5 汇报 §五：严格 8/10（#1-#8）、宽松 8/10；
+    #9、#10 因模型输出截断而 unparsable_output（与 (b) #7、#8 同类）。
+    """
+
+    def test_10_probe_c_structure_if_present(self):
+        loaded = _load_probe("decompose-probe-s2-5-c-gemini.jsonl")
+        if loaded is None:
+            self.skipTest("候选 (c) 探查文件尚未生成")
+        goals, executions = loaded
+        self.assertEqual(len(goals), 10)
+        self.assertEqual(len(executions), 2)
+        decomposed = [r for r in goals
+                      if r["result"]["decision"] == "decomposed"]
+        failed = [r for r in goals
+                  if r["result"]["decision"] == "failed"]
+        self.assertEqual(len(decomposed), 8)
+        self.assertEqual([r["n"] for r in failed], [9, 10])
+        for rec in failed:
+            self.assertEqual(rec["result"]["reason"], "unparsable_output")
+        for rec in decomposed:
+            result = rec["result"]
+            self.assertEqual(result["model"], "gemini-flash")
+            for step in result["steps"]:
+                self.assertIn(step["tool"], DECOMPOSE_ALLOWED_TOOLS)
+                self.assertIsInstance(step["args"], dict)
+                self.assertTrue(
+                    set(step["args"].keys()) <= REAL_ARG_KEYS[step["tool"]],
+                    f"#{rec['n']} {step['tool']} 有自造字段: "
+                    f"{set(step['args'].keys()) - REAL_ARG_KEYS[step['tool']]}")
+        by_n = {e["goal_n"]: e for e in executions}
+        self.assertEqual(by_n[4]["plan_run"]["decision"], "done")
+        self.assertEqual(by_n[1]["plan_run"]["decision"], "denied")
+        self.assertEqual(by_n[1]["plan_run"]["reason"],
+                         "external_requires_network")
 
 
 if __name__ == "__main__":

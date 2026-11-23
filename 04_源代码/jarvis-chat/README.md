@@ -91,3 +91,12 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 本次无 README 没写的新坑：zstd 已装、开机无 apt 锁进程；cogentco 仍在源里，但全程没走 apt，所以没删——下次如需 apt 仍须按 README 重删。
 - 新情况：根盘 overlay 仅 7.5G，拉 nomic 时报 ENOSPC（剩 12M），回归中途一度 100%（剩 64K）。已清：apt lists（198M）、非 zstd 的 deb（约 98M，zstd deb 保留）、apt pkgcache（114M）、ffmpeg 文档源码包（12M）、未用的 cuda_v12 库目录（1.3G；本机无 GPU，/dev/nvidia* 与 /proc/driver/nvidia 均不存在、无进程映射任何 cuda 库，删后 Ollama 照常服务，安装包是恢复路径）。现剩约 1.1G。结构性提醒：7.5G 根盘装 0.5b+7b+nomic+CUDA 库本就捉襟见肘，S2-6 部署手册的环境检查单应加磁盘空间一项。
 - 聊天服务：`nohup python3 server.py > server.log 2>&1 &` 重起（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true；/chat 实测“你好”→“你好！很高兴能与你交流。如果你有任何问题或需要帮助，请随时告诉我。”（model=ollama-local，tokens 30/19，耗时 1.7s，$0）。
+
+## 第十四次换机重起补充（2026-11-23 约 09:18 实测）
+
+- 本次新坑：zstd 又没了，os-intent 重放进程（apt-get install gcr，pid 4177）占着 dpkg 前端锁 10 分钟以上，20 次 dpkg -i 重试全失败（锁错误）；不要杀它、不要删锁文件。绕过去：`dpkg-deb -x` 直接解开本地缓存里的 zstd 包，不碰 dpkg 数据库——`dpkg-deb -x /var/cache/apt/archives/zstd_1.5.5+dfsg2-2build1.1_amd64.deb /tmp/zstd-pkg && cp /tmp/zstd-pkg/usr/bin/zstd /usr/bin/zstd`，zstd 1.5.5 到手；之后补跑 dpkg -i 想把 zstd 登记进数据库，同样因锁失败，不影响使用。本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，Ollama 0.40.17；建 ollama 用户（uid 999，video/render 组）+ systemd 服务 + 代理 drop-in；权重从 ~/.ollama/models 拷到 /usr/share/ollama/.ollama/models 并 chown -R ollama:ollama（家目录里只有 0.5b，380M）。
+- 模型：qwen2.5:7b 845dbda0ea48（4.7GB）、nomic-embed-text 0a109f422b47（274MB，与 S2-4 digest 一致）均为 ollama pull，两 pull 合计约 30 分钟，$0；`ollama list` 三模型齐全。
+- cogentco 仍在源里，但全程没走 apt，所以没删——下次如需 apt 仍须按 README 重删。
+- pytest：pip3 24.0 已在，`pip3 install --break-system-packages pytest`，pytest 9.2.0（代理走 /etc/environment）。
+- 满盘（本次最大坑）：新机根盘 7.5G、开局剩 7.4G，装完 Ollama（/usr/local/lib/ollama 2.4G，含 cuda_v12 1.3G + cuda_v13 1.1G + vulkan 39M）+ 三模型（5.4G）+ 家目录安装包（1.5G）后一度 100%（剩 59M）。已清：cuda_v12、cuda_v13、vulkan（本机无 GPU，/dev/nvidia* 与 /proc/driver/nvidia 均不存在，运行中 ollama 进程 maps 里无 cuda/vulkan 映射，删后重启照常服务）、apt lists（198M）、非 zstd 的 deb、/tmp/zstd-pkg；zstd deb 与安装包保留。现剩 2.0G。结构性提醒：7.5G 根盘装整套东西本就捉襟见肘，0.40.17 开始同时带 cuda_v12 和 cuda_v13 两套，S2-6 部署手册的环境检查单须加磁盘空间一项，且重起流程应把“删无用 GPU 库”写进标准步骤。
+- 聊天服务：`nohup python3 server.py > server.log 2>&1 &` 重起（换机后无旧进程，不用 pkill）。验证：/health ok=true、model_present=true；/chat 实测“你好”→“你好！很高兴能与你交流。如果你有任何问题或需要帮助，请随时告诉我。”（model=ollama-local，tokens 30/19，耗时 6.8s，$0）；删 GPU 库重启后又验了一遍，/health、/chat 均正常。
