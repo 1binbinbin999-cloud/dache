@@ -179,3 +179,14 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 改动只有一行：`../jarvis-s2-2/config.yaml` 里 `providers.ollama-local.model` 由 `qwen2.5:0.5b` 改为 `qwen2.5:7b`；重启聊天服务（kill 旧 server.py PID 2361，setsid 形式重起）即生效。换机恢复时仍按老流程拉三模型，聊天默认走 7b。
 - 验证：/health ok=true、router_mode=live；/chat 实测“你好，请用一句话介绍你自己”→“你好，我叫Qwen，是来自阿里云的大规模语言模型，很高兴为你服务。”（model=ollama-local，tokens 35/21，耗时约 75 秒，$0）；`ollama ps` 见 qwen2.5:7b 845dbda0ea48 在跑（5.1GB，100% CPU）。注意：7b 仍自称 Qwen（同系列换大号，品牌没变）；纯 CPU 上明显慢于 0.5b（约 75 秒 vs 2–6 秒），介意速度可随时换回 0.5b（同一行改回去）。
 - 用户同日补充方向：想要“自己的本地模型”，其它模型只作辅助成长。现状：Jarvis 架构上模型本就是可替换件（本行配置即证明），但“自己的模型”即在自有数据上微调出的模型，目前尚无训练管线、无 GPU（本虚拟机纯 CPU、根盘 7.5G），须等 S2-7 实体机部署盘点硬件后再定。
+
+## 第二十八次换机重起补充（2026-11-24 约 09:28 换机，约 10:24 恢复完成）
+
+- 本次新坑：以 root 身份读运行中 ollama 进程的 /proc/<pid>/maps 报 Permission denied（本机可能开了 hidepid/ptrace_scope），清 GPU 库前核映射的办法走不通。替代核查：/dev/nvidia* 与 /proc/driver/nvidia 均不存在 + 删库后 ollama 照常加载 7b、/chat 正常，证明删库安全。教训：maps 读不到时不要硬核，改用"无 GPU 设备文件 + 删后加载验证"两步确认。
+- 小发现：df 读数在拷 0.5b 前后有抖动（6.9G → 6.6G → 6.9G → 6.5G），overlay 记账有延迟/抖动；拉模型前以最近一次 df 为准即可，余量够就拉，不必追单次读数。
+- 其余老步骤一次走通：zstd 这次已装（/usr/bin/zstd），全程没走 apt；cogentco 仍在源里（nobody 拥有的 overlay metacopy，就地改写仍报 Permission denied），按第 27 次的办法 rm + tee 重建（只留 azure，备份 ubuntu.sources.bak-cogentco）；本地包 sha256 已验 1df9d622…，`zstd -dc` 流式解压到 /usr/local，Ollama 0.40.17；useradd 按官方形式一次建对（`useradd -r -s /bin/false -U -m -d /usr/share/ollama ollama`，带 `-m -d`，第 21 次的坑没重现）；systemd 服务 + 代理 drop-in（取自 /etc/environment），服务第一次起就 active；0.5b 家目录拷回并 `chown -R ollama:ollama`。
+- 与第 22/23/25 次相同：这次 tar 包解出来的 `/usr/local/lib/ollama` 权限又是 770（第 19/20/21/27 次是 755），起服务前 `chmod 755` 修掉，之后 ollama 用户跑 llama-server --version（0.9.0-dev）一次通过。教训不变：每次装完先看权限、先以 ollama 用户跑一次 llama-server --version 再往下走，别赌。
+- 磁盘时序（第二十次的教训）：开局根盘剩 6.9G，装完 Ollama 后剩 5.0G，7b（4.7G）+ nomic（0.27G）刚好不够；这次在拉模型前先清了 cuda_v12/v13 + vulkan（约 2.4G），清后剩 6.6G 再拉。拉取期间未重启 ollama 服务（第 15 次教训）。
+- 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，380M）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉，约 28.5 分钟，前段 4.1–7.1 MB/s、后段约 2.8 MB/s，收尾变慢）、nomic-embed-text 0a109f422b47（274MB，重拉，约 96 秒），digest 与 S2-4 一致；`ollama list` 三模型齐全。注意：7b 的 partial 文件是稀疏文件、表观大小早早就到 4.68G，看 du 才是真实进度；别因表观大小不动就误判卡死、也别中途杀掉重拉。
+- 聊天服务：7b 拉完后才起（默认模型已是 7b，见下条；7b 未到之前起服务 /chat 会报 503），setsid 形式（第 23 次的教训）。验证：/health ok=true、model_present=true（三模型在列）；/chat 实测"你好，请用一句话介绍你自己"→"你好，我叫Qwen，是来自阿里云的大规模语言模型，很高兴为你服务。"（model=ollama-local，tokens 35/21，耗时 58.4s，$0）；`ollama ps` 见 qwen2.5:7b 845dbda0ea48 在跑（5.1GB，100% CPU）。根盘剩 1.8G。
+- 默认模型已是 7b：本次恢复按 2026-11-24 08:41 用户决定（config.yaml 改动在提交 9b73572）拉齐三模型，聊天默认走 7b；7b 仍自称 Qwen，纯 CPU 上约 58 秒，比 0.5b（2–6 秒）慢得多，介意速度可随时换回 0.5b（同一行改回去）。
