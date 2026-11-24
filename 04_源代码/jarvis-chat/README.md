@@ -40,7 +40,7 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
   ```
   （代理地址取自本机 `/etc/environment`，无凭证版；drop-in 在 `/etc` 下，换机后会丢，重起时须重建。）
 
-- 模型是 qwen2.5:0.5b（小模型，S2-1/S2-2 验证用的那个），回复会比较简单；JIS-016 已判它拆分目标不可用。想聊得好需换更大模型或接 Gemini（免费层 RPD 20/天，需从 AI Studio 取 Key）。
+- 模型（2026-11-24 用户决定换成 7b）：默认聊天模型是 qwen2.5:7b（原 0.5b 小模型，S2-1/S2-2 验证用的那个，JIS-016 已判它拆分目标不可用；7b 在 S2-6 严格 7/10 达线）。换模型只改 `../jarvis-s2-2/config.yaml` 里 `providers.ollama-local.model` 一行，重启聊天服务即生效，业务代码不动；再想换别的本地模型（Llama/DeepSeek/Mistral）同理，先 `ollama pull` 再改这一行。注意 7b 在本机纯 CPU 上很慢（一句自我介绍约 75 秒），0.5b 约 2–6 秒。Gemini 免费层仍可作云端备选（RPD 20/天，需从 AI Studio 取 Key）。
 - 服务是后台进程，虚拟机更换后会停，须按上面第 2 步重起；代码在 GitHub（dache）有备份，重起只须重装 Ollama + 拉模型 + 起服务，不用重写代码。
 - 持久化（systemd 服务、开机自启）待后续做。
 
@@ -172,3 +172,10 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 磁盘时序（第二十次的教训）：装完 Ollama 后根盘剩 5.6G，7b（4.7G）+ nomic（0.27G）刚好不够；这次在拉模型前先清了 cuda_v12/v13 + vulkan（约 2.4G，清之前核过运行中的 ollama 进程 maps 里无 cuda/vulkan 映射、且 /dev/nvidia* 与 /proc/driver/nvidia 均不存在），清后剩 6.7G 再拉。拉取期间未重启 ollama 服务（第 15 次教训）。
 - 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，380M）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉，约 28 分钟，2.5–2.6 MB/s，收尾变慢）、nomic-embed-text 0a109f422b47（274MB，重拉，约 2 分钟），digest 与 S2-4 一致；`ollama list` 三模型齐全。注意：7b 的 partial 文件是稀疏文件、表观大小早早就到 4.68G，看 du 才是真实进度；别因表观大小不动就误判卡死、也别中途杀掉重拉。
 - 聊天服务：7b 拉取期间先起（只用 0.5b，不动 Ollama 服务），setsid 形式（第 23 次的教训）。验证：/health ok=true、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“我是阿里云自主研发的超大规模语言模型，我叫通义千问。”（model=ollama-local，tokens 35/18，耗时 5.6s，$0），三模型齐后又验了一次“你好”→正常回复（30/19 token，1.7s，$0）。根盘剩 1.9G。
+
+## 默认模型切换（2026-11-24 08:41，用户决定）
+
+- 用户在 05:09、05:46、07:15 三次被问要不要换 7b 均未答，08:41 点了“换成 7b 试试”与“换 7b 做默认聊天模型”。
+- 改动只有一行：`../jarvis-s2-2/config.yaml` 里 `providers.ollama-local.model` 由 `qwen2.5:0.5b` 改为 `qwen2.5:7b`；重启聊天服务（kill 旧 server.py PID 2361，setsid 形式重起）即生效。换机恢复时仍按老流程拉三模型，聊天默认走 7b。
+- 验证：/health ok=true、router_mode=live；/chat 实测“你好，请用一句话介绍你自己”→“你好，我叫Qwen，是来自阿里云的大规模语言模型，很高兴为你服务。”（model=ollama-local，tokens 35/21，耗时约 75 秒，$0）；`ollama ps` 见 qwen2.5:7b 845dbda0ea48 在跑（5.1GB，100% CPU）。注意：7b 仍自称 Qwen（同系列换大号，品牌没变）；纯 CPU 上明显慢于 0.5b（约 75 秒 vs 2–6 秒），介意速度可随时换回 0.5b（同一行改回去）。
+- 用户同日补充方向：想要“自己的本地模型”，其它模型只作辅助成长。现状：Jarvis 架构上模型本就是可替换件（本行配置即证明），但“自己的模型”即在自有数据上微调出的模型，目前尚无训练管线、无 GPU（本虚拟机纯 CPU、根盘 7.5G），须等 S2-7 实体机部署盘点硬件后再定。

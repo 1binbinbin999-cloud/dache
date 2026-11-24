@@ -107,7 +107,7 @@ model:
       retry_backoff_s: 2
     ollama-local:
       type: ollama
-      model: qwen2.5:0.5b
+      model: qwen2.5:7b
       host: http://localhost:11434
       timeout_s: 120
       retry_max: 0
