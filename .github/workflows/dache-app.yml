@@ -1,4 +1,4 @@
-# 大车 APP 打包：Android APK + Windows EXE，v0.1.0
+# 大车 APP 打包：Android APK，v0.1.0（只做安卓；Windows 版这次不构建、不发版）
 # 触发：dache-app/ 或本文件有推送时跑；也可手动跑（Actions 页 workflow_dispatch）。
 # 注意：版本号 v0.1.0 在本文件里写死（release job 的 tag_name 与文件名）。
 # 下一版发版时，把 v0.1.0 / dache-0.1.0.* / versionCode 一起改掉。
@@ -58,28 +58,8 @@ jobs:
           path: dache-0.1.0.apk
           if-no-files-found: error
 
-  windows:
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-      - name: Set up .NET 8
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0.x'
-      - name: Publish single-file EXE
-        working-directory: dache-app/windows
-        run: dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true -o publish
-      - name: Stage EXE
-        run: Copy-Item dache-app/windows/publish/Dache.exe dache-0.1.0.exe
-      - name: Upload EXE
-        uses: actions/upload-artifact@v4
-        with:
-          name: dache-0.1.0.exe
-          path: dache-0.1.0.exe
-          if-no-files-found: error
-
   release:
-    needs: [android, windows]
+    needs: [android]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -93,9 +73,8 @@ jobs:
           tag_name: v0.1.0
           name: 大车 v0.1.0
           body: |
-            大车 v0.1.0 首版：内置解卦 + 看着吧实验室，玄夜深色。
+            大车 v0.1.0 首版（安卓）：内置解卦 + 看着吧实验室，玄夜深色。
             首次打开需设置密码与恢复码（以后每次进入都要输密码）；同步需在首次设置里粘贴 dache-sync 令牌（可跳过）。
-            安装：安卓下载 APK 安装（需允许安装未知来源应用）；Windows 下载 EXE 直接运行（便携版）。
+            安装：下载 APK 安装（需允许安装未知来源应用）。
           files: |
             dist/dache-0.1.0.apk/dache-0.1.0.apk
-            dist/dache-0.1.0.exe/dache-0.1.0.exe
