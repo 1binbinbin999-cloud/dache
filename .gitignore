@@ -15,6 +15,11 @@ data/backups/
 # 系统文件
 .DS_Store
 
+# 签名 keystore（绝不进仓库，只存 GitHub Secrets）
+*.keystore
+*.jks
+*.p12
+
 # S2-4 探查原文是测试证据，特许提交（其余 data/*.jsonl 仍忽略）
 !04_源代码/jarvis-s2-4/tests/data/decompose-probe-10-goals.jsonl
 # S2-5 探查原文同理特许提交

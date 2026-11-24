@@ -1,0 +1,92 @@
+# 大车 APP 打包：Android APK + Windows EXE，v0.1.0
+# 触发：dache-app/ 或本文件有推送时跑；也可手动跑（Actions 页 workflow_dispatch）。
+# 注意：版本号 v0.1.0 在本文件里写死（release job 的 tag_name 与文件名）。
+# 下一版发版时，把 v0.1.0 / dache-0.1.0.* / versionCode 一起改掉。
+name: dache-app
+
+on:
+  push:
+    paths:
+      - 'dache-app/**'
+      - '.github/workflows/dache-app.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+      - name: Restore release keystore from Secrets
+        run: |
+          echo "${{ secrets.DACHE_KEYSTORE_BASE64 }}" | base64 -d > /tmp/dache-release.p12
+          test -s /tmp/dache-release.p12
+      - name: Build release APK
+        working-directory: dache-app/android
+        env:
+          DACHE_KEYSTORE_FILE: /tmp/dache-release.p12
+          DACHE_KEYSTORE_PASSWORD: ${{ secrets.DACHE_KEYSTORE_PASSWORD }}
+          DACHE_KEY_ALIAS: ${{ secrets.DACHE_KEY_ALIAS }}
+          DACHE_KEY_PASSWORD: ${{ secrets.DACHE_KEY_PASSWORD }}
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --stacktrace
+      - name: Stage APK
+        run: cp dache-app/android/app/build/outputs/apk/release/app-release.apk dache-0.1.0.apk
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: dache-0.1.0.apk
+          path: dache-0.1.0.apk
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+      - name: Publish single-file EXE
+        working-directory: dache-app/windows
+        run: dotnet publish -c Release -r win-x64 --self-contained true /p:PublishSingleFile=true /p:IncludeNativeLibrariesForSelfExtract=true -o publish
+      - name: Stage EXE
+        run: Copy-Item dache-app/windows/publish/Dache.exe dache-0.1.0.exe
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: dache-0.1.0.exe
+          path: dache-0.1.0.exe
+          if-no-files-found: error
+
+  release:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Create Release v0.1.0
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1.0
+          name: 大车 v0.1.0
+          body: |
+            大车 v0.1.0 首版：内置解卦 + 看着吧实验室，玄夜深色。
+            首次打开需设置密码与恢复码（以后每次进入都要输密码）；同步需在首次设置里粘贴 dache-sync 令牌（可跳过）。
+            安装：安卓下载 APK 安装（需允许安装未知来源应用）；Windows 下载 EXE 直接运行（便携版）。
+          files: |
+            dist/dache-0.1.0.apk/dache-0.1.0.apk
+            dist/dache-0.1.0.exe/dache-0.1.0.exe
