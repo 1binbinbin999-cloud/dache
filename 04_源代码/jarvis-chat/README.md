@@ -463,3 +463,12 @@ curl -s -X POST localhost:8000/chat -H 'Content-Type: application/json' \
 - 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，397MB）、qwen2.5:7b 845dbda0ea48（4.7GB，重拉，约 27.3 分钟，约 2.0–4.0 MB/s，收尾变慢）、nomic-embed-text 0a109f422b47（274MB，重拉，约 101 秒），digest 与 S2-4 一致；`ollama list` 三模型齐全。注意：7b 的 partial 文件是稀疏文件，看 du 才是真实进度；别因进度条数字就误判卡死、也别中途杀掉重拉。
 - 聊天服务：7b 拉完后才起（默认模型已是 7b；7b 未到之前起服务 /chat 会报 503），setsid 形式（第 23 次的教训）。起服务那次 exec 报 output_drain_timeout，是已知情况（第 25 次的教训：server.py 子进程还在跑，不是起失败），/health 当即 ok=true，不用杀它。
 - 验证：/health ok=true、router_mode=live、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“你好，我叫Qwen，是来自阿里云的大规模语言模型，很高兴为你服务。”（model=ollama-local，tokens 35/21，耗时 56.3s，$0）；`ollama ps` 见 qwen2.5:7b 845dbda0ea48 在跑（5.1GB，100% CPU）。根盘剩 1.9G。
+
+## 第六十八次换机重起补充（2026-11-27 约 16:44 CST 换机，约 17:43 CST 恢复完成）
+
+- 本次换机时间按本机 boot（2026-11-27 08:44 UTC）计。第 67 次恢复刚在约 15:16 CST 完成（提交 44ad3ac），约 1.5 小时后本机又被换掉，67 次的本地安装与模型全部清零；GitHub 上的提交未受影响。
+- 本次是接力恢复：上一任恢复子代理 8607b9c8 被取消（未完成、无结果），但它已取得进展——Ollama 0.40.17 已装回、0.5b 已拷回（a8b0c5157701）、7b 已拉到约 1.8G partial；本次从当前状态继续，没从头重装 Ollama（systemd 服务 + 代理 drop-in 均已在，服务 active，`/usr/local/lib/ollama` 权限 755 直接可用）。
+- 本次新情况有二：① 本机 Ollama 安装里没有 cuda_v12/v13/vulkan 目录（`/usr/local/lib/ollama` 只有约 40MB 的 CPU 库），“拉模型前先清 2.4G GPU 库”这步本次不适用——清无可清；根盘 4.8G 仍够拉 7b 剩余（约 2.9G）+ nomic（0.27G），直接拉。② 17:05 时根盘剩 6.9G、17:20 时剩 4.8G，约 2.1G 去向已查明：上一任子代理拉 7b 留下的 partial 文件（`sha256-2bada8a74506…-partial` 实占 1.8G，另有 `-partial-0`…`-partial-15` 各 4K）——不是磁盘泄漏，是上一任的拉取进度。续传干净：从 1.8G 续到 4.7G 完成，digest 与 S2-4 一致，未触发第 15 次的续传损坏（那次是拉取中重启服务所致；本次拉取期间未重启 ollama 服务）。
+- 模型：qwen2.5:0.5b a8b0c5157701（家目录拷回，397MB）、qwen2.5:7b 845dbda0ea48（4.7GB，续传，09:20:38–09:38:34 UTC，约 18 分钟，约 2.6 MB/s；watcher du 读数：约 9 分钟 3.2G、约 18 分钟完成）、nomic-embed-text 0a109f422b47（274MB，重拉，约 100 秒），digest 与 S2-4 一致；`ollama list` 三模型齐全。注意：7b 的 partial 文件是稀疏文件，看 du 才是真实进度；别因进度条数字就误判卡死、也别中途杀掉重拉。
+- 聊天服务：7b 拉完后才起（默认模型已是 7b；7b 未到之前起服务 /chat 会报 503），setsid 形式（第 23 次的教训）。起服务那次 exec 报 output_drain_timeout，是已知情况（第 25 次的教训：server.py 子进程还在跑，不是起失败），/health 当即 ok=true，不用杀它。本次第一次 /chat 一次通过（70.6 秒，未触发第 44 次的冷启动 120 秒超时；第 66 次曾在 120 秒报 model_unavailable，本次没重现），model_unavailable 的教训仍保留——若报该错，先看 `ollama ps` 确认 7b 是否在加载，在加载就等一会儿重试，不要反复重启服务或重拉模型。
+- 验证：/health ok=true、router_mode=live、model_present=true（三模型在列）；/chat 实测“你好，请用一句话介绍你自己”→“你好，我叫Qwen，是来自阿里云的大规模语言模型，很高兴为你服务。”（model=ollama-local，tokens 35/21，耗时 70.6s，$0）；`ollama ps` 见 qwen2.5:7b 845dbda0ea48 在跑（5.1GB，100% CPU）。根盘剩 1.9G。
